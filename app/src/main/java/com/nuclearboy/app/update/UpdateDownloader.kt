@@ -11,6 +11,7 @@ import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
@@ -81,6 +82,17 @@ object UpdateDownloader {
     /** 安装已下载的 APK */
     fun install(context: Context, file: File) {
         try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                !context.packageManager.canRequestPackageInstalls()
+            ) {
+                val settingsIntent = Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:${context.packageName}"),
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(settingsIntent)
+                Log.e(TAG, "$TAG_D 尚未允许安装未知应用，已打开系统授权页")
+                return
+            }
             val uri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
@@ -143,12 +155,13 @@ object UpdateDownloader {
                 val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
                 cursor.close()
 
-                if (status == DownloadManager.STATUS_SUCCESSFUL && file.exists()) {
+                if (status == DownloadManager.STATUS_SUCCESSFUL && isApkFile(file)) {
                     Log.e(TAG, "$TAG_D 下载成功: ${file.length()} bytes")
                     showInstallNotification(context, file, version)
                     install(context, file)
                 } else {
-                    Log.e(TAG, "$TAG_D 下载失败: status=$status")
+                    Log.e(TAG, "$TAG_D 下载失败或内容不是 APK: status=$status size=${file.length()}")
+                    file.delete()
                 }
             } else {
                 cursor.close()
@@ -156,6 +169,19 @@ object UpdateDownloader {
 
             // 注销广播
             context.unregisterReceiver(this)
+        }
+    }
+
+    /** APK 是 ZIP 容器；拒绝 GitHub 错误页或代理返回的 HTML。 */
+    private fun isApkFile(file: File): Boolean {
+        if (!file.isFile || file.length() < 1024L) return false
+        return try {
+            file.inputStream().use { input ->
+                input.read() == 'P'.code && input.read() == 'K'.code
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "$TAG_D APK 文件校验失败: ${e.message}")
+            false
         }
     }
 

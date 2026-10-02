@@ -5,7 +5,6 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -20,7 +19,7 @@ import java.util.concurrent.TimeUnit
 /**
  * 更新检查器
  *
- * 检查链：作者服务器 → GitHub Releases（兜底）
+ * 检查链：GitHub Releases（q7m4v9k2x/nuclear-boy）
  * - 启动时后台静默检查
  * - 发现新版本 → 发送系统通知
  * - 设置页手动检查 + 版本号显示
@@ -31,10 +30,6 @@ class UpdateManager(private val context: Context) {
         private const val TAG = "NuclearBoy"
         private const val TAG_U = "[UpdateMgr]"
 
-        // 作者服务器上的 version.json（主检查源）
-        private const val SERVER_URL =
-            "https://muzapar.hongxinjie.cn/projects/NUCLEAR%20BOY/version.json"
-        // GitHub Releases API（兜底）
         private const val GITHUB_API =
             "https://api.github.com/repos/q7m4v9k2x/nuclear-boy/releases/latest"
 
@@ -62,23 +57,24 @@ class UpdateManager(private val context: Context) {
 
     // ── 数据模型 ────────────────────────────────────
 
-    /** 作者服务器 version.json */
-    @Serializable
-    data class ServerVersion(
-        val version: String = "",
-        val versionCode: Int = 0,
-        val download_url: String = "",
-        val changelog: String = "",
-        val force_update: Boolean = false,
-    )
-
-    /** GitHub Release */
+    /** GitHub Release and its downloadable APK assets. */
     @Serializable
     data class GitHubRelease(
         val tag_name: String = "",
         val name: String = "",
         val body: String = "",
         val html_url: String = "",
+        val draft: Boolean = false,
+        val prerelease: Boolean = false,
+        val assets: List<GitHubAsset> = emptyList(),
+    )
+
+    @Serializable
+    data class GitHubAsset(
+        val name: String = "",
+        val browser_download_url: String = "",
+        val content_type: String = "",
+        val size: Long = 0L,
     )
 
     sealed class UpdateResult {
@@ -86,6 +82,7 @@ class UpdateManager(private val context: Context) {
             val version: String,
             val url: String,
             val body: String,
+            val releaseUrl: String,
             val force: Boolean = false,
         ) : UpdateResult()
         object UpToDate : UpdateResult()
@@ -117,7 +114,7 @@ class UpdateManager(private val context: Context) {
 
     // ── 主逻辑 ──────────────────────────────────────
 
-    /** 检查更新 */
+    /** Check the repository's latest published GitHub Release. */
     suspend fun checkForUpdate(force: Boolean = false): UpdateResult {
         return withContext(Dispatchers.IO) {
             if (!force) {
@@ -128,71 +125,12 @@ class UpdateManager(private val context: Context) {
                 }
             }
 
-            // 1. 先查作者服务器
-            val serverResult = checkServer()
-            if (serverResult != null) {
-                return@withContext serverResult
-            }
-
-            // 2. 服务器挂了，回退 GitHub
-            Log.e(TAG, "$TAG_U 服务器不可达，回退 GitHub")
             return@withContext checkGitHub()
         }
     }
 
-    /** 检查作者服务器 version.json */
-    private suspend fun checkServer(): UpdateResult? {
-        var result: UpdateResult? = null
-        try {
-            Log.e(TAG, "$TAG_U 检查服务器: $SERVER_URL")
-            val request = Request.Builder()
-                .url(SERVER_URL)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36")
-                .build()
-
-            val response = client.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Log.e(TAG, "$TAG_U 服务器返回: ${response.code}")
-                response.close()
-            } else {
-                val body = response.body?.string()
-                if (body != null) {
-                    val serverVer = json.decodeFromString<ServerVersion>(body)
-                    val latestVersion = serverVer.version
-                    val currentVersion = getCurrentVersion()
-
-                    Log.e(TAG, "$TAG_U 服务器: $latestVersion | 当前: $currentVersion")
-
-                    prefs.edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
-
-                    if (isNewer(latestVersion, currentVersion)) {
-                        val lastKnown = prefs.getString(KEY_LAST_VERSION, "")
-                        if (lastKnown != latestVersion) {
-                            prefs.edit().putString(KEY_LAST_VERSION, latestVersion).apply()
-                            showUpdateNotification(latestVersion, serverVer.download_url, serverVer.changelog)
-                        }
-                        Log.e(TAG, "$TAG_U 发现新版本: $latestVersion (force=${serverVer.force_update})")
-                        result = UpdateResult.Available(
-                            latestVersion,
-                            serverVer.download_url.ifBlank { "https://github.com/q7m4v9k2x/nuclear-boy/releases/latest" },
-                            serverVer.changelog,
-                            serverVer.force_update,
-                        )
-                    } else {
-                        Log.e(TAG, "$TAG_U 已是最新")
-                        result = UpdateResult.UpToDate
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "$TAG_U 服务器检查失败: ${e.message}")
-        }
-        return result
-    }
-
-    /** 回退：GitHub Releases API */
+    /** Check GitHub and return a direct APK URL for this build variant. */
     private suspend fun checkGitHub(): UpdateResult {
-        var result: UpdateResult = UpdateResult.Error("未知错误")
         try {
             Log.e(TAG, "$TAG_U 检查 GitHub: $GITHUB_API")
             val request = Request.Builder()
@@ -201,41 +139,64 @@ class UpdateManager(private val context: Context) {
                 .header("User-Agent", "NuclearBoy-UpdateChecker/1.0")
                 .build()
 
-            val response = client.newCall(request).execute()
-            val body = response.body?.string()
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.string()
+                if (body == null) {
+                    return UpdateResult.Error("GitHub 返回空响应")
+                }
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "$TAG_U GitHub API返回: ${response.code}")
+                    return UpdateResult.Error("GitHub HTTP ${response.code}")
+                }
 
-            if (body == null) {
-                result = UpdateResult.Error("空响应")
-            } else if (!response.isSuccessful) {
-                Log.e(TAG, "$TAG_U GitHub API返回: ${response.code}")
-                result = UpdateResult.Error("HTTP ${response.code}")
-            } else {
                 val release = json.decodeFromString<GitHubRelease>(body)
-                val latestVersion = release.tag_name
+                val latestVersion = release.tag_name.trim()
                 val currentVersion = getCurrentVersion()
-
                 Log.e(TAG, "$TAG_U GitHub: $latestVersion | 当前: $currentVersion")
-
                 prefs.edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
 
-                if (isNewer(latestVersion, currentVersion)) {
-                    val lastKnown = prefs.getString(KEY_LAST_VERSION, "")
-                    if (lastKnown != latestVersion) {
-                        prefs.edit().putString(KEY_LAST_VERSION, latestVersion).apply()
-                        showUpdateNotification(latestVersion, release.html_url, release.body)
-                    }
-                    Log.e(TAG, "$TAG_U 发现新版本: $latestVersion")
-                    result = UpdateResult.Available(latestVersion, release.html_url, release.body)
-                } else {
-                    Log.e(TAG, "$TAG_U 已是最新")
-                    result = UpdateResult.UpToDate
+                if (latestVersion.isBlank() || release.draft || release.prerelease || !isNewer(latestVersion, currentVersion)) {
+                    Log.e(TAG, "$TAG_U 已是最新或 Release 不可发布")
+                    return UpdateResult.UpToDate
                 }
+
+                val asset = selectApkAsset(release.assets)
+                    ?: return UpdateResult.Error("GitHub Release 未提供适配当前构建的 APK")
+                val downloadUrl = asset.browser_download_url.trim()
+                if (!downloadUrl.startsWith("https://", ignoreCase = true)) {
+                    return UpdateResult.Error("GitHub APK 下载地址不是 HTTPS")
+                }
+
+                val lastKnown = prefs.getString(KEY_LAST_VERSION, "")
+                if (lastKnown != latestVersion) {
+                    prefs.edit().putString(KEY_LAST_VERSION, latestVersion).apply()
+                    showUpdateNotification(latestVersion, downloadUrl, release.body)
+                }
+                Log.e(TAG, "$TAG_U 发现新版本: $latestVersion APK=${asset.name}")
+                return UpdateResult.Available(
+                    version = latestVersion,
+                    url = downloadUrl,
+                    body = release.body,
+                    releaseUrl = release.html_url,
+                )
             }
         } catch (e: Exception) {
             Log.e(TAG, "$TAG_U GitHub检查失败: ${e.message}")
-            result = UpdateResult.Error(e.message ?: "未知错误")
+            return UpdateResult.Error(e.message ?: "GitHub 检查失败")
         }
-        return result
+    }
+
+    private fun selectApkAsset(assets: List<GitHubAsset>): GitHubAsset? {
+        val apkAssets = assets.filter { asset ->
+            asset.name.endsWith(".apk", ignoreCase = true) &&
+                asset.browser_download_url.startsWith("https://", ignoreCase = true)
+        }
+        if (apkAssets.isEmpty()) return null
+
+        val isDebugBuild = context.packageName.endsWith(".debug")
+        val variant = if (isDebugBuild) "debug" else "release"
+        return apkAssets.firstOrNull { it.name.contains(variant, ignoreCase = true) }
+            ?: apkAssets.firstOrNull { !it.name.contains(if (isDebugBuild) "release" else "debug", ignoreCase = true) }
     }
 
     /** 自动检查（启动时调用，静默） */
