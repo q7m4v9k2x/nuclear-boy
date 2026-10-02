@@ -11,7 +11,6 @@
 **本仓库非原作者上传。**
 
 - **原作者**: [mzpr00](https://github.com/mzpr00) (穆再排尔·穆合塔尔)
-- **本仓库维护者**: [jjjjqx960-wq](https://github.com/jjjjqx960-wq)
 - **说明**: 本仓库为原项目的复制/镜像（mirror），仅供学习研究使用。所有代码版权归原作者 mzpr00 所有。
 
 ---
