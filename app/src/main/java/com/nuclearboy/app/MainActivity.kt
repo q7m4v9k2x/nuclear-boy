@@ -25,8 +25,12 @@ import com.nuclearboy.app.navigation.NuclearBoyNavHost
 import com.nuclearboy.app.ui.projects.ProjectViewModel
 import com.nuclearboy.app.ui.sidebar.SidebarContent
 import com.nuclearboy.app.ui.theme.NuclearBoyTheme
+import com.nuclearboy.app.update.UpdateDownloader
 import dagger.hilt.android.AndroidEntryPoint
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -56,6 +60,22 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleShareIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // DownloadManager broadcasts are lost if Android kills the process during
+        // an update. Re-query the persisted download after every return from the
+        // unknown-source settings page and finish installation when authorized.
+        UpdateDownloader.ensurePendingDownloadReceiver(applicationContext)
+        lifecycleScope.launch {
+            val pending = withContext(Dispatchers.IO) {
+                UpdateDownloader.pendingInstallFile(applicationContext)
+            }
+            if (pending != null) {
+                UpdateDownloader.install(applicationContext, pending)
+            }
+        }
     }
 
     /** 外部 App 通过分享菜单把文本发进来 → 投递到聊天输入框；桌面快捷方式 → 导航指令。 */

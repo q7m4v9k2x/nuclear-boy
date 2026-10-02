@@ -98,6 +98,12 @@ class ChatViewModel @Inject constructor(
     private var currentProjectId: String? = null
     private var currentThinkingId: String? = null
     private var currentAssistantMsgId: String? = null
+    /** Incremented whenever a project/session is replaced. Stale stream callbacks cannot save over it. */
+    @Volatile private var conversationEpoch: Long = 0L
+    /** Prevents a slower project switch from overwriting a newer selection. */
+    @Volatile private var projectSwitchGeneration: Long = 0L
+    private val turnEpochs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val persistenceLock = Any()
     private var selectedMode: Int = 0
     /** 用户通过 /goal 设定的会话目标，每轮注入上下文 */
     private var sessionGoal: String? = null
@@ -151,11 +157,18 @@ class ChatViewModel @Inject constructor(
 
     private val _projectFiles = MutableStateFlow<List<FileInfo>>(emptyList())
     val projectFiles: StateFlow<List<FileInfo>> = _projectFiles.asStateFlow()
+    private val _savedConversations = MutableStateFlow<List<SavedConversation>>(emptyList())
+    val savedConversations: StateFlow<List<SavedConversation>> = _savedConversations.asStateFlow()
 
     suspend fun setProject(projectId: String) {
         android.util.Log.e("NuclearBoy", "[ChatVM] setProject() projectId=$projectId previousId=$currentProjectId currentDir=${fileOperations.currentProjectDir}")
-        // 切换项目前取消当前任务，避免旧项目的流式结果写入新项目的消息列表
-        if (_isProcessing.value) cancelCurrentOperation()
+        val switchGeneration = projectSwitchGeneration + 1L
+        projectSwitchGeneration = switchGeneration
+        conversationEpoch++
+        // 切换项目时按 Job 是否仍在运行来取消，而不只看 isProcessing。
+        // launch(Dispatchers.IO) 可能已经返回 Job、但还没来得及把
+        // _isProcessing 设为 true；只检查状态会让旧请求漏进新项目。
+        if (agentJob?.isActive == true || _isProcessing.value) cancelCurrentOperation()
         // currentProjectDir 由外部 selectProject() 设置（UUID → 目录名的转换）
         // 此处不覆盖，信任外部已设置正确
         currentProjectId = projectId
@@ -165,8 +178,10 @@ class ChatViewModel @Inject constructor(
         // 每次切换都重新加载消息
         val loaded = try { loadPersistedMessages(projectId) }
             catch (e: Exception) { android.util.Log.e("NuclearBoy", "[ChatVM] 加载历史失败: ${e.message}"); emptyList() }
+        if (switchGeneration != projectSwitchGeneration) return
         android.util.Log.e("NuclearBoy", "[ChatVM] setProject() messagesLoaded=${loaded.size} root=${root.absolutePath}")
         _messages.value = loaded
+        refreshSavedConversationsFor(projectId)
         // 恢复最后一条用户消息，否则切换项目后直接点"重新生成"会因 lastUserMessage 为 null 失效
         lastUserMessage = loaded.findLast { it.role == MessageRole.USER }
         refreshProjectFiles()
@@ -180,6 +195,7 @@ class ChatViewModel @Inject constructor(
             // Await the reload so the active skill list and tool registry are
             // ready before the chat can send its first turn after navigation.
             skillManager.reloadProjectSkills(skillsDir)
+            if (switchGeneration != projectSwitchGeneration) return
         } catch (e: Exception) { android.util.Log.e("NuclearBoy", "[ChatVM] setProject() skills load failed: ${e.message}") }
     }
 
@@ -228,28 +244,88 @@ class ChatViewModel @Inject constructor(
         refreshProjectFiles(newPath)
     }
 
-    private fun saveMessages() {
-        val pid = currentProjectId ?: return
-        android.util.Log.e("NuclearBoy", "[ChatVM] saveMessages() pid=$pid messagesCount=${_messages.value.size}")
-        try {
-            // 直接用 workspaceRoot + projectId 构建路径，不依赖 currentProjectDir
-            val dir = java.io.File(fileOperations.getWorkspaceRoot(), "$pid/.agent")
-            dir.mkdirs()
-            val data = memoryJson.encodeToString(serializer(), _messages.value.takeLast(MAX_PERSISTED_MESSAGES))
-            val file = java.io.File(dir, "conversation.json")
-            // 原子写：先写临时文件再 rename，避免进程在 writeText 中途被杀导致 conversation.json
-            // 被截断——那样 loadPersistedMessages 解码会抛异常、整段历史被当成空全丢。
-            val tmp = java.io.File(dir, "conversation.json.tmp")
-            tmp.writeText(data)
-            if (!tmp.renameTo(file)) {
-                // 极少数文件系统 rename 覆盖失败：退回直接覆盖，至少不比原来差
-                file.writeText(data)
-                tmp.delete()
-            }
-            android.util.Log.e("NuclearBoy", "[ChatVM] saveMessages() saved to ${file.absolutePath}")
-        } catch (e: Exception) {
-            android.util.Log.e("NuclearBoy", "[ChatVM] saveMessages() error: ${e.message}", e)
+    private fun saveMessages(expectedEpoch: Long? = null) {
+        if (expectedEpoch != null && expectedEpoch != conversationEpoch) {
+            android.util.Log.e("NuclearBoy", "[ChatVM] saveMessages() skipped stale epoch=$expectedEpoch current=$conversationEpoch")
+            return
         }
+        val pid = currentProjectId ?: return
+        synchronized(persistenceLock) {
+            if (expectedEpoch != null && expectedEpoch != conversationEpoch) return
+            android.util.Log.e("NuclearBoy", "[ChatVM] saveMessages() pid=$pid messagesCount=${_messages.value.size}")
+            try {
+                // 直接用 workspaceRoot + projectId 构建路径，不依赖 currentProjectDir
+                val dir = java.io.File(fileOperations.getWorkspaceRoot(), "$pid/.agent")
+                dir.mkdirs()
+                val data = memoryJson.encodeToString(serializer(), _messages.value.takeLast(MAX_PERSISTED_MESSAGES))
+                val file = java.io.File(dir, "conversation.json")
+                // 原子写：先写临时文件再 rename，避免进程在 writeText 中途被杀导致 conversation.json
+                // 被截断——那样 loadPersistedMessages 解码会抛异常、整段历史被当成空全丢。
+                val tmp = java.io.File(dir, "conversation.json.tmp")
+                tmp.writeText(data)
+                if (!tmp.renameTo(file)) {
+                    // 极少数文件系统 rename 覆盖失败：退回直接覆盖，至少不比原来差
+                    file.writeText(data)
+                    tmp.delete()
+                }
+                android.util.Log.e("NuclearBoy", "[ChatVM] saveMessages() saved to ${file.absolutePath}")
+            } catch (e: Exception) {
+                android.util.Log.e("NuclearBoy", "[ChatVM] saveMessages() error: ${e.message}", e)
+            }
+        }
+    }
+
+    private fun refreshSavedConversationsFor(projectId: String) {
+        _savedConversations.value = ConversationArchiveStore.list(
+            workspaceRoot = fileOperations.getWorkspaceRoot(),
+            projectId = projectId,
+            json = memoryJson,
+        )
+    }
+
+    /** Re-read the archive list after an external/debug write. */
+    fun refreshSavedConversations() {
+        currentProjectId?.let(::refreshSavedConversationsFor)
+    }
+
+    /** Restore an archived conversation into the active slot. */
+    fun restoreConversation(conversationId: String) {
+        val pid = currentProjectId ?: return
+        val restored = ConversationArchiveStore.restore(
+            workspaceRoot = fileOperations.getWorkspaceRoot(),
+            projectId = pid,
+            conversationId = conversationId,
+            json = memoryJson,
+        ) ?: return
+        // Stop an in-flight turn before taking the snapshot that will be
+        // archived.  Otherwise a late stream event can race this read/write
+        // and either be omitted from the archive or persist under the
+        // restored conversation after it replaces the active list.
+        cancelCurrentOperation()
+        // 恢复历史会替换当前会话；先把当前内容也归档，避免用户在恢复时
+        // 无意丢掉尚未归档的对话（新对话流程通常这里为空）。
+        val currentMessages = _messages.value
+        if (currentMessages.isNotEmpty()) {
+            val archived = ConversationArchiveStore.archive(
+                workspaceRoot = fileOperations.getWorkspaceRoot(),
+                projectId = pid,
+                messages = currentMessages,
+                json = memoryJson,
+            )
+            if (archived == null) {
+                android.util.Log.e("NuclearBoy", "[ChatVM] restoreConversation() archive current conversation failed")
+                addSystemMessage("无法归档当前对话，未恢复历史记录；请检查存储空间后重试")
+                saveMessages()
+                return
+            }
+            refreshSavedConversationsFor(pid)
+        }
+        conversationEpoch++
+        _messages.value = restored
+        lastUserMessage = restored.findLast { it.role == MessageRole.USER }
+        contextManager.reset()
+        saveMessages()
+        _scrollToBottom.value++
     }
 
     private fun loadPersistedMessages(projectId: String): List<ChatMessage> {
@@ -308,8 +384,9 @@ class ChatViewModel @Inject constructor(
         // Cancel any existing processing cleanly
         cancelCurrentOperation()
 
+        val turnEpoch = conversationEpoch
         agentJob = viewModelScope.launch(Dispatchers.IO) {
-            executeTurn(trimmed)
+            executeTurn(trimmed, turnEpoch = turnEpoch)
         }
     }
 
@@ -321,7 +398,12 @@ class ChatViewModel @Inject constructor(
     private suspend fun executeTurn(
         trimmed: String,
         clearAgentJobOnFinalize: Boolean = true,
+        turnEpoch: Long = conversationEpoch,
     ): String {
+        // setProject/clearConversation can invalidate a Job before its IO
+        // coroutine gets scheduled. Never append a stale turn into the new
+        // project's StateFlow or persist it under the new project id.
+        if (turnEpoch != conversationEpoch) return ""
         val toolEvidenceMessage = buildToolActionEvidenceMessage(trimmed)?.let { evidence ->
             ChatMessage(role = MessageRole.SYSTEM, content = evidence, status = MessageStatus.COMPLETE)
         }
@@ -336,22 +418,24 @@ class ChatViewModel @Inject constructor(
             // message is persisted below, but retry uses this in-memory pointer
             // and otherwise has nothing to resend after a key is configured.
             lastUserMessage = userMessage
+            if (turnEpoch != conversationEpoch) return ""
             _messages.update { current ->
                 if (toolEvidenceMessage == null) current + userMessage else current + userMessage + toolEvidenceMessage
             }
             addSystemMessage("需要配置 DeepSeek API Key 才能开始\n\n请到右上角「设置」输入你的 Key（sk-v4- 开头），保存后即可使用。\n如果你用的是自建模型服务，也可以在设置里开启「第三方模型」")
-            saveMessages()
+            saveMessages(turnEpoch)
             return ""
         }
 
         val userMessage = ChatMessage(
             role = MessageRole.USER, content = trimmed, status = MessageStatus.COMPLETE,
         )
+        if (turnEpoch != conversationEpoch) return ""
         _messages.update { current ->
             if (toolEvidenceMessage == null) current + userMessage else current + userMessage + toolEvidenceMessage
         }
         lastUserMessage = userMessage
-        saveMessages()
+        saveMessages(turnEpoch)
         _scrollToBottom.value++
         _isProcessing.value = true
 
@@ -359,6 +443,7 @@ class ChatViewModel @Inject constructor(
         val assistantId = UUID.randomUUID().toString()
         currentThinkingId = assistantId
         currentAssistantMsgId = assistantId
+        turnEpochs[assistantId] = turnEpoch
         val placeholder = ChatMessage(
             id = assistantId, role = MessageRole.ASSISTANT,
             content = "", status = MessageStatus.THINKING,
@@ -368,7 +453,7 @@ class ChatViewModel @Inject constructor(
         // If Android kills the process while the model is streaming, the next
         // launch still has the complete prompt and can show an interrupted
         // turn instead of losing the conversation tail.
-        saveMessages()
+        saveMessages(turnEpoch)
         _streamingState.value = StreamingState(messageId = assistantId, isThinking = true)
         _scrollToBottom.value++
 
@@ -513,6 +598,9 @@ class ChatViewModel @Inject constructor(
         val job = agentJob
         val wasActive = job != null && job.isActive
         android.util.Log.e("NuclearBoy", "[ChatVM] cancelCurrentOperation() jobActive=$wasActive")
+        // Invalidate late AgentEvent callbacks from the cancelled generation,
+        // even when the cancellation happens before _isProcessing is set.
+        if (wasActive) conversationEpoch++
         if (job != null && job.isActive) {
             job.cancel()
             agentEngine.cancel()
@@ -531,7 +619,28 @@ class ChatViewModel @Inject constructor(
 
     fun clearConversation() {
         android.util.Log.e("NuclearBoy", "[ChatVM] clearConversation() entry messagesCount=${_messages.value.size}")
+        val projectId = currentProjectId
+        val previousMessages = _messages.value
         cancelCurrentOperation()
+        // "New conversation" must preserve the finished conversation so a user
+        // can return to it later. Archive before replacing the active file; an
+        // empty/new conversation still uses the same project and workspace.
+        if (projectId != null && previousMessages.isNotEmpty()) {
+            val archived = ConversationArchiveStore.archive(
+                workspaceRoot = fileOperations.getWorkspaceRoot(),
+                projectId = projectId,
+                messages = previousMessages,
+                json = memoryJson,
+            )
+            if (archived == null) {
+                android.util.Log.e("NuclearBoy", "[ChatVM] clearConversation() archive failed; preserving current conversation")
+                addSystemMessage("无法归档当前对话，未清空；请检查存储空间后重试")
+                saveMessages()
+                return
+            }
+            refreshSavedConversationsFor(projectId)
+        }
+        conversationEpoch++
         _messages.value = emptyList()
         lastUserMessage = null
         contextManager.reset()
@@ -897,6 +1006,8 @@ class ChatViewModel @Inject constructor(
     // ── Private: event handling ─────────────────────────────────────────
 
     private suspend fun handleAgentEvent(event: AgentEvent, thinkingId: String) {
+        val turnEpoch = turnEpochs[thinkingId] ?: return
+        if (turnEpoch != conversationEpoch) return
         when (event) {
             is AgentEvent.Thinking -> {
                 // 每500字才打一次日志，避免流式思考阶段每token都触发 Log.e
@@ -954,7 +1065,7 @@ class ChatViewModel @Inject constructor(
                         status = event.message.status,
                     )
                 }
-                saveMessages()
+                saveMessages(turnEpoch)
             }
 
             is AgentEvent.ToolExecution -> {
@@ -1010,7 +1121,7 @@ class ChatViewModel @Inject constructor(
                 }
                 // Tool results are meaningful context even if the app is
                 // closed before the final assistant response arrives.
-                saveMessages()
+                saveMessages(turnEpoch)
                 // Skill Creator writes .agent/skills through Python, so the
                 // tool result itself has no FileChange list for AgentEngine to
                 // emit. Reload synchronously before the next model turn so
@@ -1156,6 +1267,11 @@ class ChatViewModel @Inject constructor(
     }
 
     private suspend fun finalizeProcessing(thinkingId: String, clearAgentJob: Boolean = true) {
+        val turnEpoch = turnEpochs[thinkingId] ?: return
+        if (turnEpoch != conversationEpoch) {
+            turnEpochs.remove(thinkingId)
+            return
+        }
         // /loop 模式下 clearAgentJob=false：轮间不重置 _isProcessing，防止用户消息插入循环间隙
         if (clearAgentJob) _isProcessing.value = false
         if (clearAgentJob) agentJob = null
@@ -1197,7 +1313,8 @@ class ChatViewModel @Inject constructor(
             // 之前这里什么都不做，"thinking" 状态的常驻通知会一直卡在通知栏，服务也不会停止。
             notificationCallback?.invoke("stop", currentProjectId)
         }
-        saveMessages()
+        saveMessages(turnEpoch)
+        turnEpochs.remove(thinkingId)
         // 自动提取记忆：从本次对话中学习用户偏好和项目信息
         val projectId = currentProjectId ?: "default"
         val lastUser = lastUserMessage?.content ?: ""
@@ -1251,7 +1368,13 @@ class ChatViewModel @Inject constructor(
     private fun appendToolActionMissingEvidenceReview(lastAssistant: ChatMessage?) {
         val userText = lastUserMessage?.content.orEmpty()
         val assistant = lastAssistant ?: return
-        if (assistant.status != MessageStatus.COMPLETE || assistant.content.isBlank()) return
+        // A failed request is still a completed turn from the user's point of view.
+        // ToolMissingEvidenceReviewUiTest deliberately uses an invalid mock:// endpoint
+        // to finish quickly; the assistant bubble is ERROR in that case.  Keep the
+        // post-turn evidence warning for both terminal statuses so a tool-shaped
+        // request cannot silently lose its review just because the gateway failed.
+        if (assistant.status != MessageStatus.COMPLETE && assistant.status != MessageStatus.ERROR) return
+        if (assistant.content.isBlank()) return
         val hasVisibleToolEvidence = assistant.toolCalls.isNotEmpty() || assistant.fileChanges.isNotEmpty()
         val review = buildToolActionMissingEvidenceReview(
             userText = userText,

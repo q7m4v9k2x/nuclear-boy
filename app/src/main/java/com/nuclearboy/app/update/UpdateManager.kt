@@ -75,6 +75,9 @@ class UpdateManager(private val context: Context) {
         val browser_download_url: String = "",
         val content_type: String = "",
         val size: Long = 0L,
+        // GitHub's API returns this as `sha256:<hex>` for newly uploaded assets.
+        // Older releases may omit it, so verification remains backward compatible.
+        val digest: String? = null,
     )
 
     sealed class UpdateResult {
@@ -83,6 +86,8 @@ class UpdateManager(private val context: Context) {
             val url: String,
             val body: String,
             val releaseUrl: String,
+            val expectedSize: Long = 0L,
+            val expectedDigest: String = "",
             val force: Boolean = false,
         ) : UpdateResult()
         object UpToDate : UpdateResult()
@@ -170,7 +175,13 @@ class UpdateManager(private val context: Context) {
                 val lastKnown = prefs.getString(KEY_LAST_VERSION, "")
                 if (lastKnown != latestVersion) {
                     prefs.edit().putString(KEY_LAST_VERSION, latestVersion).apply()
-                    showUpdateNotification(latestVersion, downloadUrl, release.body)
+                    showUpdateNotification(
+                        version = latestVersion,
+                        downloadUrl = downloadUrl,
+                        body = release.body,
+                        expectedSize = asset.size,
+                        expectedDigest = asset.digest.orEmpty(),
+                    )
                 }
                 Log.e(TAG, "$TAG_U 发现新版本: $latestVersion APK=${asset.name}")
                 return UpdateResult.Available(
@@ -178,6 +189,8 @@ class UpdateManager(private val context: Context) {
                     url = downloadUrl,
                     body = release.body,
                     releaseUrl = release.html_url,
+                    expectedSize = asset.size,
+                    expectedDigest = asset.digest.orEmpty(),
                 )
             }
         } catch (e: Exception) {
@@ -212,13 +225,23 @@ class UpdateManager(private val context: Context) {
 
     // ── 通知 ────────────────────────────────────────
 
-    private fun showUpdateNotification(version: String, downloadUrl: String, body: String) {
+    private fun showUpdateNotification(
+        version: String,
+        downloadUrl: String,
+        body: String,
+        expectedSize: Long,
+        expectedDigest: String,
+    ) {
         createNotificationChannel()
 
         // 点击通知 → 触发应用内下载
         val downloadIntent = Intent(context, DownloadReceiver::class.java).apply {
             putExtra("url", downloadUrl)
             putExtra("version", version)
+            // Keep the values that were checked against the GitHub API with the
+            // notification click. The receiver may run much later.
+            putExtra("expected_size", expectedSize)
+            putExtra("expected_digest", expectedDigest)
         }
         val pendingIntent = PendingIntent.getBroadcast(
             context, 0, downloadIntent,

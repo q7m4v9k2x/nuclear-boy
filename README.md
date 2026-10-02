@@ -1,6 +1,6 @@
 # NUCLEAR BOY (核弹男孩)
 
-> 温暖、智能、人性化的移动端 AI 编程助手 · v1.1.72
+> 温暖、智能、人性化的移动端 AI 编程助手 · v1.1.73
 
 把一个能写代码、控手机、还能**远程操控电脑上 Claude Code / Codex / OpenCode** 的 AI 助手装进口袋。
 
@@ -54,6 +54,13 @@
 3. `./gradlew assembleDebug`
 
 或直接到 [Releases](https://github.com/q7m4v9k2x/nuclear-boy/releases) 下载 APK。
+
+## 1.1.73 重点
+
+- 新对话会先归档当前消息，可从“历史对话”恢复；应用重启后继续保留当前会话和未完成消息。
+- Skill Creator 创建 Skill 后立即刷新当前会话的 Skill 数量、列表和工具注册。
+- GitHub 更新检测与一键更新增强：校验 HTTPS APK、包名、版本、大小和 SHA-256；进程重启或授权返回后可继续安装。
+- 修复工具受限提示、流式错误恢复和测试配置注入，完成授权真机多轮对话与历史恢复回归。
 
 ## 1.1.72 重点
 

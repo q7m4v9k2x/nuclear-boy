@@ -2,6 +2,7 @@ package com.nuclearboy.api.deepseek
 
 import com.nuclearboy.common.ModelTier
 import com.nuclearboy.common.ThinkingMode
+import com.nuclearboy.common.AppError
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -14,6 +15,28 @@ import java.nio.charset.StandardCharsets
 
 /** Regression coverage for the HTTP/SSE stream boundary. */
 class DeepSeekStreamingTest {
+
+    @Test(timeout = 5_000)
+    fun `malformed custom endpoint is reported without retrying`() = runBlocking {
+        val client = DeepSeekApiClient(
+            apiKeyProvider = { "test-key" },
+            baseUrlProvider = { "mock://missing-evidence/v1" },
+            modelOverrideProvider = { "mock-model" },
+        )
+        try {
+            val events = client.streamChat(
+                messages = listOf(MessageDto(role = "user", content = "ping")),
+                modelTier = ModelTier.V4_FLASH,
+                thinkingMode = ThinkingMode.DISABLED,
+            ).toList()
+
+            assertFalse("a malformed URL must not trigger network retries", events.any { it is StreamEvent.ContentReset })
+            val error = events.filterIsInstance<StreamEvent.Error>().single()
+            assertEquals(AppError.InvalidRequest, error.appError)
+        } finally {
+            client.close()
+        }
+    }
 
     @Test(timeout = 15_000)
     fun `truncated SSE is retried and does not become a false completion`() = runBlocking {

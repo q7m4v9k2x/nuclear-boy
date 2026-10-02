@@ -17,6 +17,11 @@ class ToolDraftHintUiTest {
     private val device: UiDevice = UiDevice.getInstance(instrumentation)
     private val robot = ChatJourneyRobot()
 
+    private data class ProviderSnapshot(
+        val activeModelId: String,
+        val customModels: List<CustomModelConfig>,
+    )
+
     @Test
     fun customProviderToolDraftShowsPreSendHint() {
         withTemporaryToolDraftProvider {
@@ -113,26 +118,36 @@ class ToolDraftHintUiTest {
 
     private fun withTemporaryToolDraftProvider(block: () -> Unit) {
         val apiKeyManager = ApiKeyManager(instrumentation.targetContext)
-        val previousModelId = apiKeyManager.getActiveModelId()
-        val previousConfig = apiKeyManager.getCustomModelConfig(previousModelId)
+        val previous = ProviderSnapshot(
+            activeModelId = apiKeyManager.getActiveModelId(),
+            customModels = apiKeyManager.state.value.customModels.mapNotNull { state ->
+                apiKeyManager.getCustomModelConfig(state.id)
+            },
+        )
         try {
             apiKeyManager.setCustomProviderConfig(
-                baseUrl = "http://127.0.0.1:1/v1",
+                // An invalid scheme makes OkHttp fail before any network wait;
+                // the test only needs a deterministic terminal error to verify
+                // that the post-send evidence reminder remains visible.
+                baseUrl = "mock://tool-draft-hint/v1",
                 modelName = "local/tool-draft-hint",
                 apiKey = "",
             )
             block()
         } finally {
-            restoreProvider(apiKeyManager, previousModelId, previousConfig)
+            restoreProvider(apiKeyManager, previous)
         }
     }
 
     private fun restoreProvider(
         apiKeyManager: ApiKeyManager,
-        previousModelId: String,
-        previousConfig: CustomModelConfig?,
+        previous: ProviderSnapshot,
     ) {
-        if (previousConfig != null) {
+        val previousIds = previous.customModels.map { it.id }.toSet()
+        apiKeyManager.state.value.customModels
+            .filterNot { it.id in previousIds }
+            .forEach { apiKeyManager.deleteCustomModel(it.id) }
+        previous.customModels.forEach { previousConfig ->
             apiKeyManager.saveCustomModel(
                 existingId = previousConfig.id,
                 displayName = previousConfig.displayName,
@@ -144,6 +159,6 @@ class ToolDraftHintUiTest {
                 selectAfterSave = false,
             )
         }
-        apiKeyManager.selectModel(previousModelId)
+        apiKeyManager.selectModel(previous.activeModelId)
     }
 }

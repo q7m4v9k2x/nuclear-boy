@@ -1552,6 +1552,11 @@ class DeepSeekApiClient(
     private fun classifyError(e: Exception): AppError {
         val result = when (e) {
             is DeepSeekHttpException -> AppError.fromHttpCode(e.code)
+            // OkHttp throws IllegalArgumentException before any network I/O when a
+            // custom endpoint is malformed (for example, the `mock://` URL used by
+            // local UI diagnostics). Retrying the same invalid configuration only
+            // delays the actionable error and can make the UI look stuck.
+            is IllegalArgumentException -> AppError.InvalidRequest
             is SSLException -> AppError.NetworkUnavailable
             is java.net.SocketTimeoutException -> AppError.NetworkTimeout
             is IOException -> {

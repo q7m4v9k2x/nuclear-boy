@@ -127,6 +127,7 @@ fun ChatScreen(
     val isProcessing by viewModel.isProcessing.collectAsState()
     val streamingState by viewModel.streamingState.collectAsState()
     val scrollToBottom by viewModel.scrollToBottom.collectAsState()
+    val savedConversations by viewModel.savedConversations.collectAsState()
     val apiKeyState by viewModel.apiKeyState.collectAsState()
     val context = LocalContext.current
     LaunchedEffect(Unit) {
@@ -143,6 +144,7 @@ fun ChatScreen(
     var inputFocusRequest by remember { mutableLongStateOf(0L) }
     var forceNextScrollToBottom by remember { mutableStateOf(true) }
     var showClearConfirm by remember { mutableStateOf(false) }
+    var showConversationHistory by remember { mutableStateOf(false) }
     // 会话内搜索
     var showSearch by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
@@ -283,15 +285,31 @@ fun ChatScreen(
                         }
                     }
                     Spacer(Modifier.weight(1f))
-                    // 新对话（清空当前对话，带确认）
+                    // 新对话（清空当前对话，带确认）。即使当前消息仍在异步加载，
+                    // 也要让按钮有反馈；确认时 clearConversation 会安全地处理空会话。
                     IconButton(
-                        onClick = { if (messages.isNotEmpty()) showClearConfirm = true },
+                        onClick = { showClearConfirm = true },
                         modifier = Modifier.size(44.dp),
                     ) {
                         Icon(
                             Icons.Default.Add,
                             "新对话",
                             tint = NuclearBoyTheme.colorScheme.material.onSurfaceVariant,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            viewModel.refreshSavedConversations()
+                            showConversationHistory = true
+                        },
+                        modifier = Modifier.size(44.dp),
+                    ) {
+                        Icon(
+                            Icons.Default.History,
+                            "历史对话",
+                            tint = if (showConversationHistory) NuclearBoyTheme.colorScheme.material.primary
+                                   else NuclearBoyTheme.colorScheme.material.onSurfaceVariant,
                             modifier = Modifier.size(24.dp),
                         )
                     }
@@ -620,8 +638,58 @@ fun ChatScreen(
                 },
             )
         }
+
+        if (showConversationHistory) {
+            AlertDialog(
+                onDismissRequest = { showConversationHistory = false },
+                title = { Text("历史对话", fontWeight = FontWeight.Bold) },
+                text = {
+                    if (savedConversations.isEmpty()) {
+                        Text("还没有归档的对话。点击“新对话”后，当前对话会保存在这里。")
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            items(savedConversations, key = { it.id }) { conversation ->
+                                OutlinedButton(
+                                    onClick = {
+                                        viewModel.restoreConversation(conversation.id)
+                                        showConversationHistory = false
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalAlignment = Alignment.Start,
+                                    ) {
+                                        Text(
+                                            conversation.title.ifBlank { "未命名对话" },
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            "${conversation.messageCount} 条消息 · ${formatConversationTime(conversation.updatedAt)}",
+                                            fontSize = 11.sp,
+                                            color = NuclearBoyTheme.colorScheme.material.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showConversationHistory = false }) { Text("关闭") }
+                },
+            )
+        }
     } // Box
 }
+
+private fun formatConversationTime(timestamp: Long): String =
+    java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(timestamp))
 
 // ═══════════════════════════════════════════════════════════════════════
 //  File Panel

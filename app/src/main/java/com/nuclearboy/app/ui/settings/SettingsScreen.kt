@@ -1727,7 +1727,13 @@ fun SettingsScreen(
                             }
                             Spacer(Modifier.height(4.dp))
                             TextButton(onClick = {
-                                UpdateDownloader.download(context, result.url, result.version)
+                                UpdateDownloader.download(
+                                    context = context,
+                                    url = result.url,
+                                    version = result.version,
+                                    expectedSize = result.expectedSize,
+                                    expectedDigest = result.expectedDigest,
+                                )
                             }) { Text("下载并安装 →", color = Color(0xFF00E676)) }
                         }
                         is UpdateManager.UpdateResult.UpToDate -> {

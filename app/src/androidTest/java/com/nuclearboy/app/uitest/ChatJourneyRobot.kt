@@ -1,10 +1,12 @@
 package com.nuclearboy.app.uitest
 
-import android.util.Base64
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiObject2
+import com.nuclearboy.api.deepseek.ApiKeyManager
+import com.nuclearboy.api.deepseek.ProviderEndpointMode
+import com.nuclearboy.api.deepseek.ProviderProtocol
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -19,8 +21,14 @@ data class ChatTurnEvidence(
 
 class ChatJourneyRobot {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
+    private val apiKeyManager by lazy { ApiKeyManager(instrumentation.targetContext) }
     val device: UiDevice = UiDevice.getInstance(instrumentation)
     val appPackageName: String = "com.nuclearboy.app.debug"
+
+    data class DebugProviderSnapshot(
+        val activeModelId: String,
+        val customModels: List<ApiKeyManager.CustomModelConfig>,
+    )
 
     fun prepareFreshConversation() {
         resetConversationHistory()
@@ -45,28 +53,58 @@ class ChatJourneyRobot {
         model: String,
         apiKey: String,
         endpointMode: String = "auto",
-    ) {
-        val result = device.executeShellCommand(
-            listOf(
-                "am broadcast",
-                "-a com.nuclearboy.app.DEBUG_SAVE_CUSTOM_MODEL",
-                "-n $appPackageName/com.nuclearboy.app.diagnostics.DebugModelConfigReceiver",
-                "--es base_url_b64 ${baseUrl.toShellSafeBase64()}",
-                "--es model_name_b64 ${model.toShellSafeBase64()}",
-                "--es api_key_b64 ${apiKey.toShellSafeBase64()}",
-                "--es protocol openai",
-                "--es endpoint_mode ${endpointMode.shellSingleQuoted()}",
-                "--ez select_after_save true",
-                "--ez keep_only true",
-            ).joinToString(" "),
+    ): DebugProviderSnapshot {
+        val snapshot = DebugProviderSnapshot(
+            activeModelId = apiKeyManager.getActiveModelId(),
+            customModels = apiKeyManager.state.value.customModels.mapNotNull { state ->
+                apiKeyManager.getCustomModelConfig(state.id)
+            },
         )
-        assertFalse("调试模型配置广播不应失败：$result", result.contains("Exception", ignoreCase = true))
-        assertTrue("调试模型配置广播应完成：$result", result.contains("Broadcast completed"))
+        val mode = when (endpointMode.trim().lowercase()) {
+            "exact", "full", "完整地址" -> ProviderEndpointMode.EXACT
+            else -> ProviderEndpointMode.AUTO
+        }
+        // API keys stay inside ApiKeyManager's encrypted preferences.  Do not
+        // put them into an `am broadcast` command where shell history/logcat
+        // could expose them.
+        apiKeyManager.saveCustomModel(
+            existingId = apiKeyManager.state.value.customModels.firstOrNull {
+                it.modelName == model || it.baseUrl == baseUrl
+            }?.id,
+            displayName = model,
+            baseUrl = baseUrl,
+            modelName = model,
+            protocol = ProviderProtocol.OPENAI,
+            endpointMode = mode,
+            apiKey = apiKey,
+            selectAfterSave = true,
+        )
+        return snapshot
+    }
+
+    fun restoreDebugProvider(snapshot: DebugProviderSnapshot) {
+        val previousIds = snapshot.customModels.map { it.id }.toSet()
+        apiKeyManager.state.value.customModels
+            .filterNot { it.id in previousIds }
+            .forEach { apiKeyManager.deleteCustomModel(it.id) }
+        snapshot.customModels.forEach { config ->
+            apiKeyManager.saveCustomModel(
+                existingId = config.id,
+                displayName = config.displayName,
+                baseUrl = config.baseUrl,
+                modelName = config.modelName,
+                protocol = config.protocol,
+                endpointMode = config.endpointMode,
+                apiKey = config.apiKey,
+                selectAfterSave = false,
+            )
+        }
+        apiKeyManager.selectModel(snapshot.activeModelId)
     }
 
     fun resetConversationHistory() {
         val result = device.executeShellCommand(
-            "am broadcast -a com.nuclearboy.app.DEBUG_CLEAR_CONVERSATION " +
+            "am broadcast --receiver-foreground -a com.nuclearboy.app.DEBUG_CLEAR_CONVERSATION " +
                 "-n $appPackageName/com.nuclearboy.app.diagnostics.DebugConversationSeedReceiver " +
                 "--es project_id ${DEBUG_SEED_PROJECT_ID.shellSingleQuoted()} " +
                 "--ez select_after_write true",
@@ -78,7 +116,12 @@ class ChatJourneyRobot {
     fun launchApp() {
         wakeAndUnlockScreen()
         val activityName = "$appPackageName/com.nuclearboy.app.MainActivity"
-        val launchResult = device.executeShellCommand("am start -W -n $activityName")
+        // MainActivity is singleTask, so a plain `am start` only delivers onNewIntent
+        // and leaves the old ViewModel (and its in-memory history) alive.  Recreate
+        // the task with NEW_TASK|CLEAR_TASK instead of force-stopping the package:
+        // instrumentation runs in the debug app process on this ROM, so force-stop
+        // would kill the test host itself.
+        val launchResult = device.executeShellCommand("am start -W -f 0x10008000 -n $activityName")
         assertFalse(
             "目标 App 启动命令不应失败：$launchResult",
             launchResult.contains("Error", ignoreCase = true) ||
@@ -357,9 +400,6 @@ class ChatJourneyRobot {
 
     private fun String.shellSingleQuoted(): String =
         "'" + replace("'", "'\\''") + "'"
-
-    private fun String.toShellSafeBase64(): String =
-        Base64.encodeToString(toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
 
     private companion object {
         /** Project selected by all seeded debug conversations unless a test overrides it. */
