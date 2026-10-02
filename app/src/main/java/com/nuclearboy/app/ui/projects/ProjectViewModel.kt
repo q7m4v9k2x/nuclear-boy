@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nuclearboy.common.Project
 import com.nuclearboy.common.SkillInfo
+import com.nuclearboy.common.AppSettingsStore
 import com.nuclearboy.memory.MemoryStore
 import com.nuclearboy.skills.SkillManager
 import com.nuclearboy.tools.docgen.FileOperations
@@ -13,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
@@ -27,11 +29,18 @@ class ProjectViewModel @Inject constructor(
     private val fileOperations: FileOperations,
     val skillManager: SkillManager,
     private val memoryStore: MemoryStore,
+    private val appSettings: AppSettingsStore,
 ) : ViewModel() {
     val activeSkills: StateFlow<List<SkillInfo>> = skillManager.activeSkills
 
     private val _projects = MutableStateFlow<List<Project>>(emptyList())
     val projects: StateFlow<List<Project>> = _projects.asStateFlow()
+
+    /** Project to restore after process recreation; null means use the general chat. */
+    private val _startupProjectId = MutableStateFlow(appSettings.lastProjectId())
+    val startupProjectId: StateFlow<String?> = _startupProjectId.asStateFlow()
+    private val _projectsLoaded = MutableStateFlow(false)
+    private val _startupMemoryLoaded = MutableStateFlow(false)
 
     private val _welcomeData = MutableStateFlow<WelcomeData?>(null)
     val welcomeData: StateFlow<WelcomeData?> = _welcomeData.asStateFlow()
@@ -115,6 +124,28 @@ class ProjectViewModel @Inject constructor(
             android.util.Log.e("NuclearBoy", "[ProjectVM] selectProject — projectId=$projectId (NOT found in ${_projects.value.size} projects)")
         }
         fileOperations.currentProjectDir = project?.name ?: projectId
+        // Keep the selected conversation stable across force-stop/relaunch. The
+        // UUID is the durable project id used by conversation persistence;
+        // FileOperations still receives the human-readable directory name.
+        appSettings.setLastProjectId(projectId)
+        _startupProjectId.value = projectId
+    }
+
+    /**
+     * Resolve the persisted project against the currently loaded project list.
+     * Deleted/invalid ids fall back to the always-present general conversation.
+     */
+    fun resolveStartupProjectId(): String {
+        val saved = _startupProjectId.value?.trim().orEmpty()
+        if (saved.isBlank() || saved == "__general__") return "__general__"
+        return if (_projects.value.any { it.id == saved }) saved else "__general__"
+    }
+
+    /** Wait until the initial directory scan has finished before navigation. */
+    suspend fun awaitStartupProjectId(): String {
+        _projectsLoaded.first { it }
+        _startupMemoryLoaded.first { it }
+        return resolveStartupProjectId()
     }
 
     fun deleteProject(projectId: String) {
@@ -154,11 +185,24 @@ class ProjectViewModel @Inject constructor(
                 val convCount = ((totalConv as? com.nuclearboy.common.AppResult.Success<*>)?.data as? String)?.toIntOrNull() ?: 0
                 android.util.Log.e("NuclearBoy", "[ProjectVM] welcomeMemory rawLastProject=$lastProject rawConv=$totalConv")
                 android.util.Log.e("NuclearBoy", "[ProjectVM] welcomeMemory project=$projectName convCount=$convCount")
+                // Migrate the legacy memory value only when there is no
+                // explicit launch preference. A user can switch projects
+                // before this background read finishes; never overwrite that
+                // newer choice with stale profile data from an older session.
+                val persistedProjectId = appSettings.lastProjectId()?.trim().orEmpty()
+                if (persistedProjectId.isBlank() &&
+                    !projectName.isNullOrBlank() && projectName != "default"
+                ) {
+                    appSettings.setLastProjectId(projectName)
+                    _startupProjectId.value = projectName
+                }
                 if (!projectName.isNullOrBlank() && projectName != "default" && convCount > 0) {
                     _welcomeData.value = WelcomeData(projectName, convCount)
                 }
+                _startupMemoryLoaded.value = true
             } catch (e: Exception) {
                 android.util.Log.e("NuclearBoy", "[ProjectVM] welcomeMemory FAILED: ${e.message}")
+                _startupMemoryLoaded.value = true
             }
         }
     }
@@ -208,10 +252,12 @@ class ProjectViewModel @Inject constructor(
                         }
                     }
                     android.util.Log.e("NuclearBoy", "[ProjectVM] loadProjects — final count=${_projects.value.size}")
+                    _projectsLoaded.value = true
                 }
                 is com.nuclearboy.common.AppResult.Failure -> {
                     android.util.Log.e("NuclearBoy", "[ProjectVM] loadProjects FAILED — ${result.error.humanMessage}")
                     // Empty or error
+                    _projectsLoaded.value = true
                 }
             }
         }

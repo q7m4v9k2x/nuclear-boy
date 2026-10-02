@@ -7,6 +7,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -20,6 +21,7 @@ import com.nuclearboy.app.ui.projects.ProjectViewModel
 import com.nuclearboy.app.ui.splash.SplashScreen
 import com.nuclearboy.app.ui.tutorial.TutorialScreen
 import com.nuclearboy.ui.chat.ChatScreen
+import kotlinx.coroutines.launch
 
 object NavRoutes {
     const val SPLASH = "splash"
@@ -42,6 +44,7 @@ fun NuclearBoyNavHost(
     projectViewModel: ProjectViewModel,
     onMenuClick: () -> Unit,
 ) {
+    val scope = rememberCoroutineScope()
     NavHost(
         navController = navController,
         startDestination = NavRoutes.SPLASH,
@@ -54,8 +57,16 @@ fun NuclearBoyNavHost(
         composable(NavRoutes.SPLASH) {
             SplashScreen(
                 onComplete = {
-                    navController.navigate(NavRoutes.chatRoute("__general__")) {
-                        popUpTo(NavRoutes.SPLASH) { inclusive = true }
+                    // Wait for the initial project scan before choosing the
+                    // destination. This restores the last project reliably
+                    // after a force-stop instead of briefly/forever opening
+                    // an empty general conversation.
+                    scope.launch {
+                        val startupProjectId = projectViewModel.awaitStartupProjectId()
+                        projectViewModel.selectProject(startupProjectId)
+                        navController.navigate(NavRoutes.chatRoute(startupProjectId)) {
+                            popUpTo(NavRoutes.SPLASH) { inclusive = true }
+                        }
                     }
                 },
             )

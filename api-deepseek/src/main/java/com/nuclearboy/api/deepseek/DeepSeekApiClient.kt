@@ -170,50 +170,73 @@ class DeepSeekApiClient(
                 var finalUsage: UsageDto? = null
                 var toolCallsDetected = false
                 var lineCount = 0
+                var validEventCount = 0
+                var malformedEventCount = 0
+                var sawDone = false
+                var sawFinishReason = false
 
                 reader.useLines { lines ->
                     for (line in lines) {
-                        if (line.isEmpty()) continue
-                        if (line == "data: [DONE]") break
-                        if (!line.startsWith("data: ")) continue
+                        val jsonStr = extractOpenAiSseData(line) ?: continue
+                        if (jsonStr.isBlank()) continue
+                        if (jsonStr == "[DONE]") {
+                            sawDone = true
+                            break
+                        }
                         lineCount++
                         if (lineCount % 50 == 0) {
                             android.util.Log.e("NuclearBoy", "[ApiClient] SSE line $lineCount processed, content=${content.length} reasoning=${reasoningContent.length}")
                         }
-                        val jsonStr = line.removePrefix("data: ")
-                        if (jsonStr.isBlank()) continue
 
-                        try {
-                            val chunk = json.decodeFromString<StreamChunk>(jsonStr)
-                            chunk.usage?.let { finalUsage = it }
+                        val chunk = try {
+                            json.decodeFromString<StreamChunk>(jsonStr)
+                        } catch (_: Exception) {
+                            malformedEventCount++
+                            continue
+                        }
+                        validEventCount++
+                        chunk.usage?.let { finalUsage = it }
 
-                            chunk.choices.forEach { choice ->
-                                val delta = choice.delta ?: return@forEach
-
-                                if (!delta.reasoningContent.isNullOrEmpty()) {
-                                    reasoningContent.append(delta.reasoningContent)
-                                    emit(StreamEvent.Thinking(delta.reasoningContent))
-                                    tokenTracker.onStreamToken(isReasoning = true)
-                                }
-                                if (!delta.content.isNullOrEmpty()) {
-                                    content.append(delta.content)
-                                    emit(StreamEvent.Content(delta.content, isReasoning = false))
-                                    tokenTracker.onStreamToken(isReasoning = false)
-                                }
-                                delta.toolCalls?.takeIf { it.isNotEmpty() }?.let { toolDeltas ->
-                                    toolCallsDetected = true
-                                    emit(StreamEvent.ToolCallDelta(toolDeltas.map { toolDelta ->
-                                        ToolCallDeltaDto(
-                                            index = toolDelta.index,
-                                            id = toolDelta.id,
-                                            type = toolDelta.type,
-                                            function = toolDelta.function,
-                                        )
-                                    }))
-                                }
+                        chunk.choices.forEach { choice ->
+                            if (!choice.finishReason.isNullOrBlank()) {
+                                sawFinishReason = true
                             }
-                        } catch (_: Exception) { continue }
+                            val delta = choice.delta ?: return@forEach
+
+                            if (!delta.reasoningContent.isNullOrEmpty()) {
+                                reasoningContent.append(delta.reasoningContent)
+                                emit(StreamEvent.Thinking(delta.reasoningContent))
+                                tokenTracker.onStreamToken(isReasoning = true)
+                            }
+                            if (!delta.content.isNullOrEmpty()) {
+                                content.append(delta.content)
+                                emit(StreamEvent.Content(delta.content, isReasoning = false))
+                                tokenTracker.onStreamToken(isReasoning = false)
+                            }
+                            delta.toolCalls?.takeIf { it.isNotEmpty() }?.let { toolDeltas ->
+                                toolCallsDetected = true
+                                emit(StreamEvent.ToolCallDelta(toolDeltas.map { toolDelta ->
+                                    ToolCallDeltaDto(
+                                        index = toolDelta.index,
+                                        id = toolDelta.id,
+                                        type = toolDelta.type,
+                                        function = toolDelta.function,
+                                    )
+                                }))
+                            }
+                        }
                     }
+                }
+
+                val streamFailure = validateOpenAiStream(
+                    validEventCount = validEventCount,
+                    malformedEventCount = malformedEventCount,
+                    sawDone = sawDone,
+                    sawFinishReason = sawFinishReason,
+                    hasUsefulOutput = content.isNotEmpty() || reasoningContent.isNotEmpty() || toolCallsDetected,
+                )
+                if (streamFailure != null) {
+                    throw IOException(streamFailure)
                 }
 
                 val usage = finalUsage ?: UsageDto(
@@ -1083,8 +1106,7 @@ class DeepSeekApiClient(
 
         reader.useLines { lines ->
             for (line in lines) {
-                if (line.isBlank() || !line.startsWith("data: ")) continue
-                val payload = line.removePrefix("data: ").trim()
+                val payload = extractOpenAiSseData(line)?.takeIf { it.isNotBlank() } ?: continue
                 if (payload == "[DONE]") {
                     sawDone = true
                     break
@@ -1129,8 +1151,7 @@ class DeepSeekApiClient(
 
         reader.useLines { lines ->
             for (line in lines) {
-                if (line.isBlank() || !line.startsWith("data: ")) continue
-                val payload = line.removePrefix("data: ").trim()
+                val payload = extractOpenAiSseData(line)?.takeIf { it.isNotBlank() } ?: continue
                 if (payload == "[DONE]") {
                     sawDone = true
                     break
@@ -1696,6 +1717,45 @@ class DeepSeekApiClient(
             }
         }
     }
+}
+
+/**
+ * Extract the payload from one OpenAI-compatible SSE data line.
+ *
+ * SSE permits both `data: {...}` and `data:{...}`.  Gateways also commonly
+ * append spaces after the field name, so trim only the field separator area and
+ * leave JSON parsing to the caller.
+ */
+internal fun extractOpenAiSseData(line: String): String? {
+    if (!line.startsWith("data:")) return null
+    return line.substring("data:".length).trim()
+}
+
+/**
+ * Reject an HTTP 200 response that was not a complete, useful SSE stream.
+ * Returning a reason lets the caller route it through the existing retry/error
+ * path instead of emitting a misleading successful empty response.
+ */
+internal fun validateOpenAiStream(
+    validEventCount: Int,
+    malformedEventCount: Int,
+    sawDone: Boolean,
+    sawFinishReason: Boolean,
+    hasUsefulOutput: Boolean,
+): String? {
+    if (malformedEventCount > 0) {
+        return "SSE stream contained $malformedEventCount malformed data event(s)"
+    }
+    if (validEventCount == 0) {
+        return "SSE stream contained no valid data events"
+    }
+    if (!sawDone && !sawFinishReason) {
+        return "SSE stream ended before a completion marker"
+    }
+    if (!hasUsefulOutput) {
+        return "SSE stream completed without content or tool calls"
+    }
+    return null
 }
 
 // ── Supporting Types ──────────────────────────────────

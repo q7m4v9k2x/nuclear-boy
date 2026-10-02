@@ -48,7 +48,11 @@ fun SkillManagerPanel(
             skillFiles = emptyList()
         } else {
             skillFiles = withContext(kotlinx.coroutines.Dispatchers.IO) {
-                val dir = File(skillManager.skillsDir, skill.name)
+                // Project skills live under the current project's .agent/skills
+                // directory; using the global skillsDir here made newly
+                // created project skills appear empty even after registration.
+                val dir = skillManager.getSkillDirectory(skill.name)
+                    ?: return@withContext emptyList()
                 if (dir.exists() && dir.isDirectory) dir.walkTopDown().filter { it.isFile }.toList()
                 else emptyList()
             }

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.NuclearBoy" parent="android:Theme.Material.NoActionBar">
+    <style name="Base.Theme.NuclearBoy" parent="android:Theme.Material.NoActionBar">
         <item name="android:colorPrimary">@color/nuclear_green</item>
         <item name="android:colorPrimaryDark">@color/nuclear_black</item>
         <item name="android:colorAccent">@color/nuclear_green</item>
@@ -8,8 +8,9 @@
         <item name="android:statusBarColor">@color/nuclear_black</item>
         <item name="android:navigationBarColor">@color/nuclear_black</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
     </style>
+
+    <style name="Theme.NuclearBoy" parent="Base.Theme.NuclearBoy" />
 
     <style name="Theme.NuclearBoy.Splash" parent="Theme.NuclearBoy">
         <item name="android:windowBackground">@color/nuclear_black</item>

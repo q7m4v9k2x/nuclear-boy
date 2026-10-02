@@ -285,7 +285,11 @@ class AgentEngine(
         val toolCallLoopGuard = ToolCallLoopGuard()
         val retryableErrorGate = RetryableErrorGate()
 
-        while (finalResponse == null && currentCoroutineContext().isActive && iteration < MAX_TOOL_ITERATIONS) {
+        // There is deliberately no fixed tool-iteration cap here. A hard count
+        // stops legitimate long tasks even when every turn makes progress. The
+        // loop is bounded by final response, cancellation, context trimming,
+        // explicit errors, and ToolCallLoopGuard's exact-repeat protection.
+        while (finalResponse == null && currentCoroutineContext().isActive) {
             iteration++
             val iterStartMs = System.currentTimeMillis()
             android.util.Log.e("NuclearBoy", "[AgentEngine] run() iteration=$iteration contextUsed=${contextManager.budget.value.totalUsed}")
@@ -310,6 +314,11 @@ class AgentEngine(
             val reasoningContent = StringBuilder()
             var toolCallsDetected = false
             var toolProtocolUnavailable = false
+            // streamChat() reports terminal HTTP/SSE failures as an event rather
+            // than throwing. Keep the failure out of the normal success path:
+            // otherwise the loop emits a COMPLETE response after an ERROR event,
+            // and ChatViewModel can overwrite the visible error state.
+            var streamError: StreamEvent.Error? = null
 
             emit(AgentEvent.Thinking(if (iteration == 1) "正在思考…" else "继续处理…"))
 
@@ -372,7 +381,7 @@ class AgentEngine(
                         }
                         is StreamEvent.Error -> {
                             android.util.Log.e("NuclearBoy", "[AgentEngine] run() Stream Error appError=${streamEvent.appError} detailLen=${streamEvent.technicalDetail?.length ?: 0}")
-                            emit(AgentEvent.Error(streamEvent.appError, streamEvent.technicalDetail))
+                            streamError = streamEvent
                         }
                         is StreamEvent.ContentReset -> {
                             android.util.Log.e("NuclearBoy", "[AgentEngine] run() ContentReset — mid-stream retry, discarding partial content")
@@ -381,7 +390,19 @@ class AgentEngine(
                     }
                 }
 
-                android.util.Log.e("NuclearBoy", "[AgentEngine] run() stream finished iteration=$iteration contentEvents=$contentEventCount responseLen=${responseContent.length} reasoningLen=${reasoningContent.length} toolCallsDetected=$toolCallsDetected iterTimeMs=${System.currentTimeMillis() - iterStartMs}")
+                android.util.Log.e("NuclearBoy", "[AgentEngine] run() stream finished iteration=$iteration contentEvents=$contentEventCount responseLen=${responseContent.length} reasoningLen=${reasoningContent.length} toolCallsDetected=$toolCallsDetected streamError=${streamError?.appError} iterTimeMs=${System.currentTimeMillis() - iterStartMs}")
+
+                // streamChat() owns HTTP/SSE retries and only emits Error after
+                // exhausting that retry budget. Treat it as a terminal API round;
+                // retrying here would multiply requests (and can turn one outage
+                // into four more full agent turns). Emit only ERROR and leave
+                // finalResponse null so no later COMPLETE Response can overwrite
+                // it in the UI.
+                val failure = streamError
+                if (failure != null) {
+                    emit(AgentEvent.Error(failure.appError, failure.technicalDetail))
+                    break
+                }
                 retryableErrorGate.onSuccessfulApiRound()
 
                 // After the stream completes, check for tool calls
@@ -537,24 +558,17 @@ class AgentEngine(
 
                 android.util.Log.e("NuclearBoy", "[AgentEngine] run() non-retryable error, breaking loop")
                 emit(AgentEvent.Error(appError, e.message))
-                finalResponse = ChatMessage(
-                    role = MessageRole.ASSISTANT,
-                    content = "抱歉，处理过程中遇到了问题：${appError.humanMessage}",
-                    status = MessageStatus.ERROR,
-                )
+                // AgentEvent.Error owns the terminal UI state. Do not emit a
+                // second Response here: the UI treats Response as a final
+                // assistant update and could otherwise turn ERROR into
+                // COMPLETE after the error event has already been handled.
+                finalResponse = null
                 break
             }
         }
 
-        // Emit the final response if we have one
-        // 若达到工具循环上限且仍无最终回复，合成一条友好提示
-        if (finalResponse == null && iteration >= MAX_TOOL_ITERATIONS) {
-            finalResponse = ChatMessage(
-                role = MessageRole.ASSISTANT,
-                content = "已连续执行 $MAX_TOOL_ITERATIONS 轮工具调用，超出单次任务上限，自动停止。如果任务未完成，可以继续追问我或用 /loop 继续推进。",
-                status = MessageStatus.COMPLETE,
-            )
-        }
+        // Emit the final response if one was produced. Explicit errors leave
+        // finalResponse null so the UI keeps the ERROR state from AgentEvent.Error.
         finalResponse?.let { response ->
             android.util.Log.e("NuclearBoy", "[AgentEngine] run() emitting final response status=${response.status} contentLen=${response.content.length} reasoningLen=${response.reasoningContent?.length ?: 0}")
             emit(AgentEvent.Response(response))
@@ -1021,7 +1035,5 @@ class AgentEngine(
         private const val MAX_TOOL_OUTPUT_CHARS = 12_000
         /** 发送前对话负载的真实 token 上限 */
         private const val MAX_PAYLOAD_TOKENS = 96_000L
-        /** 工具调用循环的绝对最大轮次，防止模型无限调工具循环。 */
-        private const val MAX_TOOL_ITERATIONS = 20
     }
 }

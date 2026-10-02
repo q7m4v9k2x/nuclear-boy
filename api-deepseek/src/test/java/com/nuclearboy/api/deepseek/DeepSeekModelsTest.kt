@@ -239,6 +239,85 @@ class DeepSeekModelsTest {
     }
 
     @Test
+    fun `OpenAI SSE accepts data field with or without separator space`() {
+        assertEquals("{\"choices\":[]}", extractOpenAiSseData("data: {\"choices\":[]}"))
+        assertEquals("{\"choices\":[]}", extractOpenAiSseData("data:{\"choices\":[]}"))
+        assertEquals("[DONE]", extractOpenAiSseData("data:[DONE]"))
+        assertNull(extractOpenAiSseData("event: message"))
+    }
+
+    @Test
+    fun `empty HTTP stream and plain JSON response are rejected as non SSE`() {
+        val emptyReason = validateOpenAiStream(
+            validEventCount = 0,
+            malformedEventCount = 0,
+            sawDone = false,
+            sawFinishReason = false,
+            hasUsefulOutput = false,
+        )
+        assertTrue(emptyReason!!.contains("no valid data events"))
+
+        // A gateway that ignores stream=true may return one ordinary JSON object
+        // without any `data:` frames. The caller must route that through retry/error.
+        assertTrue(
+            listOf("{\"id\":\"response\",\"choices\":[]}")
+                .mapNotNull(::extractOpenAiSseData)
+                .isEmpty()
+        )
+        val plainJsonReason = validateOpenAiStream(
+            validEventCount = 0,
+            malformedEventCount = 0,
+            sawDone = false,
+            sawFinishReason = false,
+            hasUsefulOutput = false,
+        )
+        assertTrue(plainJsonReason!!.contains("no valid data events"))
+    }
+
+    @Test
+    fun `partial or malformed SSE response is rejected instead of completed`() {
+        val truncatedReason = validateOpenAiStream(
+            validEventCount = 1,
+            malformedEventCount = 0,
+            sawDone = false,
+            sawFinishReason = false,
+            hasUsefulOutput = true,
+        )
+        assertTrue(truncatedReason!!.contains("before a completion marker"))
+
+        val malformedReason = validateOpenAiStream(
+            validEventCount = 1,
+            malformedEventCount = 1,
+            sawDone = true,
+            sawFinishReason = true,
+            hasUsefulOutput = true,
+        )
+        assertTrue(malformedReason!!.contains("malformed"))
+    }
+
+    @Test
+    fun `complete SSE with done or finish marker remains successful`() {
+        assertNull(
+            validateOpenAiStream(
+                validEventCount = 1,
+                malformedEventCount = 0,
+                sawDone = true,
+                sawFinishReason = false,
+                hasUsefulOutput = true,
+            )
+        )
+        assertNull(
+            validateOpenAiStream(
+                validEventCount = 1,
+                malformedEventCount = 0,
+                sawDone = false,
+                sawFinishReason = true,
+                hasUsefulOutput = true,
+            )
+        )
+    }
+
+    @Test
     fun `StreamChunk parsing handles content delta`() {
         val chunkJson = """{"choices":[{"index":0,"delta":{"content":"Hello world"}}]}"""
         val chunk = json.decodeFromString<StreamChunk>(chunkJson)

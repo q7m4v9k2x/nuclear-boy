@@ -39,6 +39,7 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="com.nuclearboy.app.DEBUG_SEED_CONVERSATION" />
+                <action android:name="com.nuclearboy.app.DEBUG_CLEAR_CONVERSATION" />
             </intent-filter>
         </receiver>
     </application>

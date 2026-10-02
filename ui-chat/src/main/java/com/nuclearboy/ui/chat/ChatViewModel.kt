@@ -152,7 +152,7 @@ class ChatViewModel @Inject constructor(
     private val _projectFiles = MutableStateFlow<List<FileInfo>>(emptyList())
     val projectFiles: StateFlow<List<FileInfo>> = _projectFiles.asStateFlow()
 
-    fun setProject(projectId: String) {
+    suspend fun setProject(projectId: String) {
         android.util.Log.e("NuclearBoy", "[ChatVM] setProject() projectId=$projectId previousId=$currentProjectId currentDir=${fileOperations.currentProjectDir}")
         // 切换项目前取消当前任务，避免旧项目的流式结果写入新项目的消息列表
         if (_isProcessing.value) cancelCurrentOperation()
@@ -171,12 +171,16 @@ class ChatViewModel @Inject constructor(
         lastUserMessage = loaded.findLast { it.role == MessageRole.USER }
         refreshProjectFiles()
         if (loaded.isNotEmpty()) _scrollToBottom.value++
-        if (projectId != "__general__") {
-            try {
-                val skillsDir = java.io.File(fileOperations.projectRoot(), AppConstants.PROJECT_SKILLS_DIR)
-                skillManager.loadProjectSkills(skillsDir)
-            } catch (e: Exception) { android.util.Log.e("NuclearBoy", "[ChatVM] setProject() skills load failed: ${e.message}") }
-        }
+        // The general agent also has a real workspace directory
+        // (__general__). Load its project skills as well, otherwise a Skill
+        // Creator run from the default conversation can never appear in the
+        // active list or become callable until the user switches projects.
+        try {
+            val skillsDir = java.io.File(fileOperations.projectRoot(), AppConstants.PROJECT_SKILLS_DIR)
+            // Await the reload so the active skill list and tool registry are
+            // ready before the chat can send its first turn after navigation.
+            skillManager.reloadProjectSkills(skillsDir)
+        } catch (e: Exception) { android.util.Log.e("NuclearBoy", "[ChatVM] setProject() skills load failed: ${e.message}") }
     }
 
     override fun onCleared() {
@@ -256,7 +260,21 @@ class ChatViewModel @Inject constructor(
             if (file.exists()) {
                 val loaded = memoryJson.decodeFromString(serializer<List<ChatMessage>>(), file.readText())
                 android.util.Log.e("NuclearBoy", "[ChatVM] loadPersistedMessages() loaded=${loaded.size}")
-                loaded
+                // A force-stop can interrupt a stream before finalizeProcessing
+                // runs. Keep that turn in history but make the interrupted
+                // assistant bubble explicit instead of silently showing an
+                // empty/forever-thinking message.
+                loaded.map { message ->
+                    if (message.role == MessageRole.ASSISTANT &&
+                        message.status != MessageStatus.COMPLETE &&
+                        message.status != MessageStatus.ERROR
+                    ) {
+                        message.copy(
+                            content = message.content.ifBlank { "上次生成在应用关闭时中断，可重试" },
+                            status = MessageStatus.ERROR,
+                        )
+                    } else message
+                }
             } else emptyList()
         } catch (e: Exception) {
             android.util.Log.e("NuclearBoy", "[ChatVM] loadPersistedMessages() error: ${e.message}", e)
@@ -346,6 +364,11 @@ class ChatViewModel @Inject constructor(
             content = "", status = MessageStatus.THINKING,
         )
         _messages.update { it + placeholder }
+        // Persist the user turn and assistant placeholder before network I/O.
+        // If Android kills the process while the model is streaming, the next
+        // launch still has the complete prompt and can show an interrupted
+        // turn instead of losing the conversation tail.
+        saveMessages()
         _streamingState.value = StreamingState(messageId = assistantId, isThinking = true)
         _scrollToBottom.value++
 
@@ -925,9 +948,13 @@ class ChatViewModel @Inject constructor(
                         reasoningContent = event.message.reasoningContent,
                         toolCalls = event.message.toolCalls.ifEmpty { msg.toolCalls },
                         tokenUsage = event.message.tokenUsage,
-                        status = MessageStatus.COMPLETE,
+                        // Preserve terminal error responses (for example the
+                        // duplicate-tool-call guard). Ordinary streamed
+                        // responses carry COMPLETE and keep the existing path.
+                        status = event.message.status,
                     )
                 }
+                saveMessages()
             }
 
             is AgentEvent.ToolExecution -> {
@@ -980,6 +1007,28 @@ class ChatViewModel @Inject constructor(
                         } else call
                     }
                     msg.copy(toolCalls = updatedCalls)
+                }
+                // Tool results are meaningful context even if the app is
+                // closed before the final assistant response arrives.
+                saveMessages()
+                // Skill Creator writes .agent/skills through Python, so the
+                // tool result itself has no FileChange list for AgentEngine to
+                // emit. Reload synchronously before the next model turn so
+                // the current chat and sidebar immediately show the new skill.
+                if (event.result.success && event.toolName.startsWith("skill_")) {
+                    try {
+                        val skillsDir = java.io.File(
+                            fileOperations.projectRoot(),
+                            AppConstants.PROJECT_SKILLS_DIR,
+                        )
+                        skillManager.reloadProjectSkills(skillsDir)
+                        android.util.Log.e(
+                            "NuclearBoy",
+                            "[ChatVM] skill tool completed; activeSkills=${skillManager.activeSkills.value.size}",
+                        )
+                    } catch (e: Exception) {
+                        android.util.Log.e("NuclearBoy", "[ChatVM] skill reload failed: ${e.message}", e)
+                    }
                 }
             }
 

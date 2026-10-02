@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializer
@@ -51,6 +53,7 @@ class SkillManager(
 
     private var currentProjectSkillsDir: File? = null
     private val projectSkillNames = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+    private val projectSkillsMutex = Mutex()
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -80,30 +83,41 @@ class SkillManager(
      */
     fun loadProjectSkills(projectSkillsDir: File) {
         android.util.Log.e("NuclearBoy", "[SkillMgr] loadProjectSkills() dir=${projectSkillsDir.absolutePath}")
-        scope.launch {
-            withContext(Dispatchers.IO) {
-                // 1. Unload previous project skills
-                unloadProjectSkillsInternal()
-                // 2. Set new project dir
-                currentProjectSkillsDir = projectSkillsDir.also { it.mkdirs() }
-                // 3. Scan and register project skills
-                val skillDirs = projectSkillsDir.listFiles()?.filter { it.isDirectory } ?: emptyList()
-                android.util.Log.e("NuclearBoy", "[SkillMgr] loadProjectSkills() found ${skillDirs.size} skill directories")
-                skillDirs.forEach { dir ->
-                    val yamlFile = dir.resolve("skill.yaml")
-                    if (yamlFile.isFile) {
-                        val manifest = parseManifest(yamlFile.readText())
-                        if (manifest != null) {
-                            android.util.Log.e("NuclearBoy", "[SkillMgr] loadProjectSkills() registered project skill: ${manifest.name}")
-                            projectSkillNames.add(manifest.name)
-                            onToolRegister?.invoke(manifest.name, manifest.description, emptyMap())
-                        }
+        scope.launch { reloadProjectSkills(projectSkillsDir) }
+    }
+
+    /**
+     * Reload a project's skills and wait until [activeSkills] has been updated.
+     *
+     * Skill Creator writes files through a Python skill, whose result does not
+     * carry FileChange records. Callers handling that tool result therefore
+     * need a synchronous refresh so the current chat/sidebar reflects the new
+     * skill before the next turn starts.
+     */
+    suspend fun reloadProjectSkills(projectSkillsDir: File) = withContext(Dispatchers.IO) {
+        projectSkillsMutex.withLock {
+            android.util.Log.e("NuclearBoy", "[SkillMgr] reloadProjectSkills() dir=${projectSkillsDir.absolutePath}")
+            // 1. Unload previous project skills
+            unloadProjectSkillsInternal()
+            // 2. Set new project dir
+            currentProjectSkillsDir = projectSkillsDir.also { it.mkdirs() }
+            // 3. Scan and register project skills
+            val skillDirs = projectSkillsDir.listFiles()?.filter { it.isDirectory } ?: emptyList()
+            android.util.Log.e("NuclearBoy", "[SkillMgr] reloadProjectSkills() found ${skillDirs.size} skill directories")
+            skillDirs.forEach { dir ->
+                val yamlFile = dir.resolve("skill.yaml")
+                if (yamlFile.isFile) {
+                    val manifest = parseManifest(yamlFile.readText())
+                    if (manifest != null) {
+                        android.util.Log.e("NuclearBoy", "[SkillMgr] reloadProjectSkills() registered project skill: ${manifest.name}")
+                        projectSkillNames.add(manifest.name)
+                        onToolRegister?.invoke(manifest.name, manifest.description, emptyMap())
                     }
                 }
-                // 4. Refresh combined list
-                refreshSkills()
-                updateActiveSkills()
             }
+            // 4. Refresh combined list
+            refreshSkills()
+            updateActiveSkills()
         }
     }
 
@@ -112,10 +126,12 @@ class SkillManager(
         android.util.Log.e("NuclearBoy", "[SkillMgr] unloadProjectSkills() unloading ${projectSkillNames.size} skills")
         scope.launch {
             withContext(Dispatchers.IO) {
-                unloadProjectSkillsInternal()
-                currentProjectSkillsDir = null
-                refreshSkills()
-                updateActiveSkills()
+                projectSkillsMutex.withLock {
+                    unloadProjectSkillsInternal()
+                    currentProjectSkillsDir = null
+                    refreshSkills()
+                    updateActiveSkills()
+                }
             }
         }
     }
@@ -123,7 +139,9 @@ class SkillManager(
     private fun unloadProjectSkillsInternal() {
         android.util.Log.e("NuclearBoy", "[SkillMgr] unloadProjectSkillsInternal() count=${projectSkillNames.size}")
         projectSkillNames.forEach { name ->
-            onToolUnregister?.invoke("skill_$name")
+            // The callback receives the manifest name; the DI layer owns the
+            // public tool-name prefix so it is applied exactly once.
+            onToolUnregister?.invoke(name)
         }
         projectSkillNames.clear()
     }
@@ -280,7 +298,9 @@ class SkillManager(
                 )
             }
 
-            onToolUnregister?.invoke("skill_$skillName")
+            // Keep the unregister callback contract consistent with project
+            // skill unloading: pass the manifest name without the tool prefix.
+            onToolUnregister?.invoke(skillName)
             refreshSkills()
             AppResult.success(true)
         }
@@ -394,6 +414,9 @@ class SkillManager(
             it.manifest.name.equals(name, ignoreCase = true)
         }
     }
+
+    /** Directory containing the selected skill, including project skills. */
+    fun getSkillDirectory(name: String): File? = getSkill(name)?.installDir
 
     // ──────────────────────────────────────────────
     //  Internal helpers

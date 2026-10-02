@@ -110,9 +110,11 @@ fun ChatScreen(
     onNotification: ((String, String?) -> Unit)? = null,
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
-    LaunchedEffect(projectId) { viewModel.setProject(projectId) }
-    // Auto-send initial message (from auto-project-creation flow)
-    LaunchedEffect(initialMessage) {
+    // Project setup loads persisted history and project skills. Keep the
+    // optional auto-send behind that same suspend boundary so an initial
+    // message cannot race setup and get overwritten or saved to no project.
+    LaunchedEffect(projectId, initialMessage) {
+        viewModel.setProject(projectId)
         if (initialMessage.isNotEmpty()) {
             viewModel.sendMessage(initialMessage)
         }

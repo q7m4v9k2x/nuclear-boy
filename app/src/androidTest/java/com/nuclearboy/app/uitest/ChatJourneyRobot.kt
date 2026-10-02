@@ -65,9 +65,12 @@ class ChatJourneyRobot {
     }
 
     fun resetConversationHistory() {
-        device.executeShellCommand(
-            "su -c rm -f /storage/emulated/0/Android/data/$appPackageName/files/NuclearBoy/__general__/.agent/conversation.json",
+        val result = device.executeShellCommand(
+            "am broadcast -a com.nuclearboy.app.DEBUG_CLEAR_CONVERSATION " +
+                "-n $appPackageName/com.nuclearboy.app.diagnostics.DebugConversationSeedReceiver",
         )
+        assertFalse("调试会话清理不应失败：$result", result.contains("Exception", ignoreCase = true))
+        assertTrue("调试会话清理广播应完成：$result", result.contains("Broadcast completed"))
     }
 
     fun launchApp() {
@@ -182,9 +185,9 @@ class ChatJourneyRobot {
 
     private fun wakeAndUnlockScreen() {
         runCatching { device.wakeUp() }
-        executeRootInput("input keyevent KEYCODE_WAKEUP")
-        device.executeShellCommand("su -c wm dismiss-keyguard")
-        device.executeShellCommand("su -c svc power stayon true")
+        executeShellInput("input keyevent KEYCODE_WAKEUP")
+        device.executeShellCommand("wm dismiss-keyguard")
+        device.executeShellCommand("svc power stayon true")
         device.waitForIdle(2_000)
     }
 
@@ -198,7 +201,7 @@ class ChatJourneyRobot {
         assertAppInForeground("聚焦聊天输入前")
         repeat(24) {
             if (focusedInput() != null) return
-            executeRootInput("input keyevent KEYCODE_DPAD_DOWN")
+            executeShellInput("input keyevent KEYCODE_DPAD_DOWN")
             Thread.sleep(120)
         }
         if (focusedInput() != null) return
@@ -217,7 +220,7 @@ class ChatJourneyRobot {
 
     private fun tapPromptObject(target: UiObject2) {
         val bounds = target.visibleBounds
-        executeRootInput("input tap ${bounds.centerX()} ${bounds.centerY()}")
+        executeShellInput("input tap ${bounds.centerX()} ${bounds.centerY()}")
         device.waitForIdle(1_000)
     }
 
@@ -237,7 +240,7 @@ class ChatJourneyRobot {
 
     private fun shellInputText(text: String) {
         val safeText = text.replace(" ", "%s")
-        executeRootInput("input text $safeText")
+        executeShellInput("input text $safeText")
         device.waitForIdle(1_000)
     }
 
@@ -247,17 +250,20 @@ class ChatJourneyRobot {
         runCatching { input.setText("") }
         if (waitUntil(2_000) { chatInputText().isNullOrEmpty() }) return
 
-        executeRootInput("input keyevent KEYCODE_MOVE_END")
+        executeShellInput("input keyevent KEYCODE_MOVE_END")
         repeat(96) {
-            executeRootInput("input keyevent KEYCODE_DEL")
+            executeShellInput("input keyevent KEYCODE_DEL")
         }
         device.waitForIdle(1_000)
     }
 
-    private fun executeRootInput(command: String) {
-        val result = device.executeShellCommand("su -c $command")
+    private fun executeShellInput(command: String) {
+        // UiAutomator's shell identity can inject input on the test AVD. Do not
+        // require a rooted emulator: `su -c` is unavailable on standard AVDs and
+        // made the end-to-end gate fail before exercising the app.
+        val result = device.executeShellCommand(command)
         assertFalse(
-            "root input 命令不应被系统拦截或失败：$result",
+            "shell input 命令不应被系统拦截或失败：$result",
             result.contains("SecurityException", ignoreCase = true) ||
                 result.contains("INJECT_EVENTS", ignoreCase = true) ||
                 result.contains("not found", ignoreCase = true) ||

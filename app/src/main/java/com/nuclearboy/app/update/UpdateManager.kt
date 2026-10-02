@@ -36,7 +36,7 @@ class UpdateManager(private val context: Context) {
             "https://muzapar.hongxinjie.cn/projects/NUCLEAR%20BOY/version.json"
         // GitHub Releases API（兜底）
         private const val GITHUB_API =
-            "https://api.github.com/repos/muzapar00/nuclear-boy/releases/latest"
+            "https://api.github.com/repos/q7m4v9k2x/nuclear-boy/releases/latest"
 
         private const val CHANNEL_ID = "update_channel"
         private const val CHANNEL_NAME = "应用更新"
@@ -174,7 +174,7 @@ class UpdateManager(private val context: Context) {
                         Log.e(TAG, "$TAG_U 发现新版本: $latestVersion (force=${serverVer.force_update})")
                         result = UpdateResult.Available(
                             latestVersion,
-                            serverVer.download_url.ifBlank { "https://github.com/muzapar00/nuclear-boy/releases/latest" },
+                            serverVer.download_url.ifBlank { "https://github.com/q7m4v9k2x/nuclear-boy/releases/latest" },
                             serverVer.changelog,
                             serverVer.force_update,
                         )

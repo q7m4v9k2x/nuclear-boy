@@ -9,6 +9,7 @@ import com.nuclearboy.agent.ToolParameter
 import com.nuclearboy.agent.ToolResult
 import com.nuclearboy.api.deepseek.*
 import com.nuclearboy.common.*
+import com.nuclearboy.common.toFileSizeString
 import com.nuclearboy.app.python.ChaquopyPythonExecutor
 import com.nuclearboy.app.service.PcTaskNotifier
 import com.nuclearboy.memory.MemoryStore

@@ -18,7 +18,25 @@ class AppSettingsStore(context: Context) {
         prefs.edit().putString(KEY_CUSTOM_INSTRUCTIONS, text.trim()).apply()
     }
 
+    /**
+     * The project that was open when the app was last used.  Chat history is
+     * stored per project, so restoring this value on launch keeps the user in
+     * the same conversation instead of silently opening the empty general
+     * chat every time the process is recreated.
+     */
+    fun lastProjectId(): String? = prefs.getString(KEY_LAST_PROJECT_ID, null)
+
+    fun setLastProjectId(projectId: String) {
+        val normalized = projectId.trim()
+        if (normalized.isEmpty()) return
+        // This value is written exactly when the user changes projects and is
+        // needed on the very next cold start. Commit it synchronously so an
+        // immediate force-stop cannot lose the selection queued by apply().
+        prefs.edit().putString(KEY_LAST_PROJECT_ID, normalized).commit()
+    }
+
     private companion object {
         const val KEY_CUSTOM_INSTRUCTIONS = "custom_instructions"
+        const val KEY_LAST_PROJECT_ID = "last_project_id"
     }
 }
