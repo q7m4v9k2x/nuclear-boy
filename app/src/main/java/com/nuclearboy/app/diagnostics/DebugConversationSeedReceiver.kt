@@ -7,6 +7,7 @@ import android.util.Base64
 import android.util.Log
 import com.nuclearboy.app.BuildConfig
 import com.nuclearboy.common.AppConstants
+import com.nuclearboy.common.AppSettingsStore
 import com.nuclearboy.common.ChatMessage
 import com.nuclearboy.common.MessageRole
 import com.nuclearboy.common.MessageStatus
@@ -28,6 +29,10 @@ class DebugConversationSeedReceiver : BroadcastReceiver() {
             ?.trim()
             ?.takeIf { it.isNotBlank() }
             ?: "__general__"
+        // Tests can ask the debug receiver to make the seeded project the
+        // next startup project.  This is deliberately opt-in: an ad-hoc ADB
+        // seed must not unexpectedly change the user's last project.
+        val selectAfterWrite = intent.getBooleanExtra(EXTRA_SELECT_AFTER_WRITE, false)
         val userContent = intent.decodedStringExtra(EXTRA_USER_CONTENT_B64)
             ?: intent.getStringExtra(EXTRA_USER_CONTENT)
             ?.takeIf { it.isNotBlank() }
@@ -44,7 +49,10 @@ class DebugConversationSeedReceiver : BroadcastReceiver() {
                 if (file.exists() && !file.delete()) {
                     throw IllegalStateException("conversation file could not be deleted")
                 }
-                Log.e(TAG, "cleared conversation project=$projectId")
+                if (selectAfterWrite) {
+                    AppSettingsStore(context).setLastProjectId(projectId)
+                }
+                Log.e(TAG, "cleared conversation project=$projectId selected=$selectAfterWrite")
                 return
             }
             file.parentFile?.mkdirs()
@@ -61,9 +69,12 @@ class DebugConversationSeedReceiver : BroadcastReceiver() {
                 ),
             )
             file.writeText(Json.encodeToString(serializer(), messages))
+            if (selectAfterWrite) {
+                AppSettingsStore(context).setLastProjectId(projectId)
+            }
             Log.e(
                 TAG,
-                "seeded conversation project=$projectId messages=${messages.size} userLen=${userContent.length} assistantLen=${assistantContent.length} path=${file.absolutePath}",
+                "seeded conversation project=$projectId selected=$selectAfterWrite messages=${messages.size} userLen=${userContent.length} assistantLen=${assistantContent.length} path=${file.absolutePath}",
             )
         } catch (e: Exception) {
             Log.e(TAG, "seed failed project=$projectId error=${e.message}", e)
@@ -79,6 +90,7 @@ class DebugConversationSeedReceiver : BroadcastReceiver() {
         const val EXTRA_USER_CONTENT_B64 = "user_content_b64"
         const val EXTRA_ASSISTANT_CONTENT = "assistant_content"
         const val EXTRA_ASSISTANT_CONTENT_B64 = "assistant_content_b64"
+        const val EXTRA_SELECT_AFTER_WRITE = "select_after_write"
 
         private const val DEFAULT_USER_CONTENT = "请真实读取 skills/app-dialog-smoke/SKILL.md"
         private const val DEFAULT_TOOL_LIMIT_CONTENT =

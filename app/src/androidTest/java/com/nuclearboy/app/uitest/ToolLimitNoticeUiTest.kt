@@ -42,7 +42,10 @@ class ToolLimitNoticeUiTest {
             Base64.NO_WRAP,
         )
         val result = device.executeShellCommand(
-            "am broadcast -a com.nuclearboy.app.DEBUG_SEED_CONVERSATION -n ${robot.appPackageName}/com.nuclearboy.app.diagnostics.DebugConversationSeedReceiver --es assistant_content_b64 $assistantContentB64",
+            "am broadcast -a com.nuclearboy.app.DEBUG_SEED_CONVERSATION " +
+                "-n ${robot.appPackageName}/com.nuclearboy.app.diagnostics.DebugConversationSeedReceiver " +
+                "--es project_id __general__ --ez select_after_write true " +
+                "--es assistant_content_b64 $assistantContentB64",
         )
         assertFalse("调试会话广播不应失败：$result", result.contains("Exception", ignoreCase = true))
         assertTrue("调试会话广播应完成：$result", result.contains("Broadcast completed"))

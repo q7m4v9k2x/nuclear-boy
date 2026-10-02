@@ -9,6 +9,7 @@ import com.nuclearboy.python.PythonSandbox
 import com.nuclearboy.python.SandboxPolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -45,6 +46,15 @@ class SkillManager(
     /** Callback invoked when a skill should be unregistered from agent tools. */
     var onToolUnregister: ((String) -> Unit)? = null
 
+    /**
+     * Callback delivery is serialized so that initial registration cannot race
+     * with a skill install/reload.  The set also prevents the same skill from
+     * being registered twice when the manager is wired after its first scan.
+     */
+    private val toolCallbackMutex = Mutex()
+    private val registeredToolNames = mutableSetOf<String>()
+    private val registeredToolDescriptions = mutableMapOf<String, String>()
+
     private val _installedSkills = MutableStateFlow<List<InstalledSkill>>(emptyList())
     val installedSkills: StateFlow<List<InstalledSkill>> = _installedSkills.asStateFlow()
 
@@ -64,11 +74,46 @@ class SkillManager(
     // YAML 解析：折叠块内容的空白合并只编译一次
     private val yamlFoldedWhitespaceRegex = Regex("\\s+")
 
+    private val initialRefreshJob: Job
+
     init {
         android.util.Log.e("NuclearBoy", "[SkillMgr] init() skillsDir=${skillsDir.absolutePath}")
-        scope.launch {
+        initialRefreshJob = scope.launch {
             refreshSkills()
             updateActiveSkills()
+        }
+    }
+
+    /**
+     * Wire the tool callbacks and synchronously publish all skills discovered
+     * during construction.  SkillManager starts its first scan in [init], so
+     * assigning callbacks after construction used to lose those registrations
+     * (and a second ad-hoc refresh could race with installs).  Waiting for that
+     * scan, installing callbacks, refreshing once, and registering under one
+     * mutex gives the DI layer a deterministic ready point.
+     */
+    suspend fun configureToolCallbacks(
+        register: ((String, String, Map<String, String>) -> Unit)?,
+        unregister: ((String) -> Unit)?,
+    ) = withContext(Dispatchers.IO) {
+        initialRefreshJob.join()
+        toolCallbackMutex.withLock {
+            onToolRegister = register
+            onToolUnregister = unregister
+            registeredToolNames.clear()
+            registeredToolDescriptions.clear()
+
+            // Pick up files created while the initial asynchronous scan was
+            // running, then expose every currently installed skill exactly once.
+            refreshSkills()
+            _installedSkills.value.forEach { skill ->
+                registerToolLocked(
+                    skill.manifest.name,
+                    skill.manifest.description,
+                    emptyMap(),
+                    force = false,
+                )
+            }
         }
     }
 
@@ -111,7 +156,7 @@ class SkillManager(
                     if (manifest != null) {
                         android.util.Log.e("NuclearBoy", "[SkillMgr] reloadProjectSkills() registered project skill: ${manifest.name}")
                         projectSkillNames.add(manifest.name)
-                        onToolRegister?.invoke(manifest.name, manifest.description, emptyMap())
+                        registerTool(manifest.name, manifest.description, emptyMap())
                     }
                 }
             }
@@ -136,12 +181,12 @@ class SkillManager(
         }
     }
 
-    private fun unloadProjectSkillsInternal() {
+    private suspend fun unloadProjectSkillsInternal() {
         android.util.Log.e("NuclearBoy", "[SkillMgr] unloadProjectSkillsInternal() count=${projectSkillNames.size}")
         projectSkillNames.forEach { name ->
             // The callback receives the manifest name; the DI layer owns the
             // public tool-name prefix so it is applied exactly once.
-            onToolUnregister?.invoke(name)
+            unregisterTool(name)
         }
         projectSkillNames.clear()
     }
@@ -300,7 +345,7 @@ class SkillManager(
 
             // Keep the unregister callback contract consistent with project
             // skill unloading: pass the manifest name without the tool prefix.
-            onToolUnregister?.invoke(skillName)
+            unregisterTool(skillName)
             refreshSkills()
             AppResult.success(true)
         }
@@ -422,6 +467,49 @@ class SkillManager(
     //  Internal helpers
     // ──────────────────────────────────────────────
 
+    private suspend fun registerTool(
+        name: String,
+        description: String,
+        metadata: Map<String, String>,
+        force: Boolean = false,
+    ) = toolCallbackMutex.withLock {
+        registerToolLocked(name, description, metadata, force)
+    }
+
+    private fun registerToolLocked(
+        name: String,
+        description: String,
+        metadata: Map<String, String>,
+        force: Boolean,
+    ) {
+        val callback = onToolRegister ?: return
+        val wasRegistered = registeredToolNames.contains(name)
+        // An install can overlap the initial configure call.  If both paths
+        // describe the same tool, the second delivery is redundant; force is
+        // still honoured when an actual reinstall changes its description.
+        if (wasRegistered && (!force || registeredToolDescriptions[name] == description)) return
+        try {
+            callback.invoke(name, description, metadata)
+            registeredToolNames.add(name)
+            registeredToolDescriptions[name] = description
+        } catch (error: Throwable) {
+            // Keep the marker clear when the first delivery failed so a later
+            // configure/install can retry instead of silently dropping it.
+            if (!wasRegistered) {
+                registeredToolNames.remove(name)
+                registeredToolDescriptions.remove(name)
+            }
+            throw error
+        }
+    }
+
+    private suspend fun unregisterTool(name: String) = toolCallbackMutex.withLock {
+        if (registeredToolNames.remove(name)) {
+            registeredToolDescriptions.remove(name)
+            onToolUnregister?.invoke(name)
+        }
+    }
+
     private suspend fun installSkillInternal(
         sourceDir: File,
         manifest: SkillManifest,
@@ -476,7 +564,14 @@ class SkillManager(
 
         // Register as a tool
         android.util.Log.e("NuclearBoy", "[SkillMgr] installSkillInternal() registering tool for ${installed.manifest.name}")
-        onToolRegister?.invoke(installed.manifest.name, installed.manifest.description, emptyMap())
+        // Re-installing an existing skill may change its description or
+        // parameters, so deliberately replace the previous tool definition.
+        registerTool(
+            installed.manifest.name,
+            installed.manifest.description,
+            emptyMap(),
+            force = true,
+        )
 
         refreshSkills()
         android.util.Log.e("NuclearBoy", "[SkillMgr] installSkillInternal() success: ${manifest.name}")

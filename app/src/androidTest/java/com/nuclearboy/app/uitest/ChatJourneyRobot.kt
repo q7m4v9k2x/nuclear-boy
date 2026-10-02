@@ -67,7 +67,9 @@ class ChatJourneyRobot {
     fun resetConversationHistory() {
         val result = device.executeShellCommand(
             "am broadcast -a com.nuclearboy.app.DEBUG_CLEAR_CONVERSATION " +
-                "-n $appPackageName/com.nuclearboy.app.diagnostics.DebugConversationSeedReceiver",
+                "-n $appPackageName/com.nuclearboy.app.diagnostics.DebugConversationSeedReceiver " +
+                "--es project_id ${DEBUG_SEED_PROJECT_ID.shellSingleQuoted()} " +
+                "--ez select_after_write true",
         )
         assertFalse("调试会话清理不应失败：$result", result.contains("Exception", ignoreCase = true))
         assertTrue("调试会话清理广播应完成：$result", result.contains("Broadcast completed"))
@@ -360,6 +362,9 @@ class ChatJourneyRobot {
         Base64.encodeToString(toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
 
     private companion object {
+        /** Project selected by all seeded debug conversations unless a test overrides it. */
+        const val DEBUG_SEED_PROJECT_ID = "__general__"
+
         private val shellSpecialChars = setOf('"', '\'', '\\', ';', '&', '|', '<', '>', '(', ')', '$', '`')
         private val knownFailures = listOf(
             "没能生成回复",

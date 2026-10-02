@@ -8,6 +8,7 @@ import dagger.hilt.android.HiltAndroidApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -19,6 +20,7 @@ import timber.log.Timber
 class NuclearBoyApp : Application() {
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val builtinSkillsReady = CompletableDeferred<Unit>()
 
     override fun onCreate() {
         super.onCreate()
@@ -43,7 +45,14 @@ class NuclearBoyApp : Application() {
 
         // Copy built-in skills from assets to internal storage（IO 操作，移到后台避免 ANR）
         appScope.launch {
-            copyBuiltinSkills()
+            try {
+                copyBuiltinSkills()
+            } finally {
+                // Hilt may construct SkillManager immediately after
+                // Application.onCreate.  Signal completion so its first scan
+                // never races the asset copy on a fresh install or upgrade.
+                builtinSkillsReady.complete(Unit)
+            }
         }
 
         // 后台检查更新
@@ -67,6 +76,11 @@ class NuclearBoyApp : Application() {
     override fun onTerminate() {
         super.onTerminate()
         instance = null
+    }
+
+    /** Wait until built-in skill assets are available on disk. */
+    suspend fun awaitBuiltinSkillsReady() {
+        builtinSkillsReady.await()
     }
 
     private fun copyBuiltinSkills() {

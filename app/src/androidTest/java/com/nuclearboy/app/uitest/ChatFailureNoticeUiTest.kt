@@ -64,6 +64,8 @@ class ChatFailureNoticeUiTest {
                 "am broadcast",
                 "-a com.nuclearboy.app.DEBUG_SEED_CONVERSATION",
                 "-n ${robot.appPackageName}/com.nuclearboy.app.diagnostics.DebugConversationSeedReceiver",
+                "--es project_id __general__",
+                "--ez select_after_write true",
                 "--es assistant_content_b64 ${assistantContent.toShellSafeBase64()}",
             ).joinToString(" "),
         )

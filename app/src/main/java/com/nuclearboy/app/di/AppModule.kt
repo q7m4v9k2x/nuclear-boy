@@ -118,6 +118,13 @@ object AppModule {
     @Singleton
     fun provideSkillsDir(@ApplicationContext context: Context): File {
         android.util.Log.e("NuclearBoy", "[DI] provideSkillsDir")
+        // Built-in skills are copied from APK assets by Application.onCreate
+        // on an IO coroutine.  Wait for that one-shot job before SkillManager
+        // scans the directory; otherwise a fresh install can expose an empty
+        // Skill list and omit the skill_* tools until the next process start.
+        (context.applicationContext as? com.nuclearboy.app.NuclearBoyApp)?.let { app ->
+            runBlocking { app.awaitBuiltinSkillsReady() }
+        }
         return File(context.filesDir, "skills").also { it.mkdirs() }
     }
 
@@ -259,20 +266,29 @@ object AppModule {
             }
         }
 
-        skillManager.onToolRegister = { name, desc, _ ->
-            android.util.Log.e("NuclearBoy", "[DI] skill tool register callback — skillName=$name, desc=${desc.take(50)}")
-            runBlocking { registry.register(ToolDefinition("skill_$name", desc,
-                executor = { p ->
-                    when (val r = runBlocking { skillManager.executeSkill(name, p) }) {
-                        is AppResult.Success -> ToolResult(true, "OK")
-                        is AppResult.Failure -> ToolResult(false, "", error = r.error.humanMessage)
+        // SkillManager performs its first filesystem scan asynchronously during
+        // construction.  Configure callbacks through its synchronization point
+        // so existing skills are registered before this provider returns, while
+        // installs/reloads wait on the same lock and cannot race or duplicate.
+        runBlocking {
+            skillManager.configureToolCallbacks(
+                register = { name, desc, _ ->
+                    android.util.Log.e("NuclearBoy", "[DI] skill tool register callback — skillName=$name, desc=${desc.take(50)}")
+                    runBlocking {
+                        registry.register(ToolDefinition("skill_$name", desc,
+                            executor = { p ->
+                                when (val r = runBlocking { skillManager.executeSkill(name, p) }) {
+                                    is AppResult.Success -> ToolResult(true, "OK")
+                                    is AppResult.Failure -> ToolResult(false, "", error = r.error.humanMessage)
+                                }
+                            }))
                     }
-                }))
-            }
-        }
-        skillManager.onToolUnregister = { name ->
-            android.util.Log.e("NuclearBoy", "[DI] skill tool unregister callback — skillName=$name")
-            runBlocking { registry.unregister("skill_$name") }
+                },
+                unregister = { name ->
+                    android.util.Log.e("NuclearBoy", "[DI] skill tool unregister callback — skillName=$name")
+                    runBlocking { registry.unregister("skill_$name") }
+                },
+            )
         }
 
         android.util.Log.e("NuclearBoy", "[DI] provideToolRegistry — returning registry")
