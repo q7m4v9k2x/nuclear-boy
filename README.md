@@ -1,6 +1,6 @@
 # NUCLEAR BOY (核弹男孩)
 
-> 温暖、智能、人性化的移动端 AI 编程助手 · v1.1.35
+> 温暖、智能、人性化的移动端 AI 编程助手 · v1.1.68
 
 把一个能写代码、控手机、还能**远程操控电脑上 Claude Code / Codex / OpenCode** 的 AI 助手装进口袋。
 
@@ -54,7 +54,14 @@
 2. 设置 `ANDROID_HOME` 环境变量
 3. `./gradlew assembleDebug`
 
-或直接到 [Releases](https://github.com/jjjjqx960-wq/nuclear-boy/releases) 下载 APK。
+或直接到 [Releases](https://github.com/muzapar00/nuclear-boy/releases) 下载 APK。
+
+## 1.1.68 重点
+
+- 修复第三方 OpenAI/Anthropic 兼容网关把普通回答误判为工具受限的问题。
+- 修复 Python 工具的项目工作目录、沙箱路径边界和超时任务取消，避免越权访问与线程泄漏。
+- 修复 Chaquopy 启动时包枚举和 Python 版本读取、`write_file` 创建/修改判定，以及无 API Key 重试时丢失用户消息。
+- 已通过模块单测、Android 15 模拟器工具链诊断和 `assembleDebug` 构建验证。
 
 ## 1.1.35 重点
 

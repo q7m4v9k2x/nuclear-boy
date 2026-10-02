@@ -52,6 +52,13 @@ class SandboxPolicyTest {
     }
 
     @Test
+    fun `allowed directory prefix sibling is blocked`() {
+        val policy = workspacePolicy()
+        val result = enforcer.validate(policy, SandboxOperation.WriteFile("workspace-other/output.txt"))
+        assertTrue(result.isFailure)
+    }
+
+    @Test
     fun `package not in allowlist is denied`() {
         val policy = SandboxPolicy.strict(sandboxDir = sandboxDir, projectDir = projectDir)
         val result = enforcer.validate(policy, SandboxOperation.InstallPackage("malicious-pkg"))

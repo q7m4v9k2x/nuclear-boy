@@ -314,6 +314,10 @@ class ChatViewModel @Inject constructor(
         if (key == null) {
             android.util.Log.e("NuclearBoy", "[ChatVM] executeTurn() no API key, showing tip")
             val userMessage = ChatMessage(role = MessageRole.USER, content = trimmed, status = MessageStatus.COMPLETE)
+            // Keep the failed submission available for the retry action.  The
+            // message is persisted below, but retry uses this in-memory pointer
+            // and otherwise has nothing to resend after a key is configured.
+            lastUserMessage = userMessage
             _messages.update { current ->
                 if (toolEvidenceMessage == null) current + userMessage else current + userMessage + toolEvidenceMessage
             }

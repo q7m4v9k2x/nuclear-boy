@@ -582,23 +582,17 @@ class AgentEngine(
         responseContent: String,
     ): Boolean {
         if (responseContent.contains("[TOOL_CALL]", ignoreCase = true)) return true
-        val lowerUser = userMessage.lowercase()
-        return listOf(
-            "read_file",
-            "write_file",
-            "list_directory",
-            "run_python",
-            "工具",
-            "读取",
-            "写入",
-            "创建",
-            "文件",
-            "执行",
-            "运行",
-            "测试",
-            "验证",
-            "真实调用",
-        ).any { lowerUser.contains(it) }
+        // A compatibility response is allowed to discuss files, testing, or
+        // execution in general.  The old implementation looked at every word
+        // in the user message and replaced ordinary answers with an error.  Only
+        // block an explicit claim that an unavailable tool was actually used.
+        val lowerResponse = responseContent.lowercase()
+        val executionClaim = Regex(
+            "(?:已|已经|刚刚|成功地?)\\s*(?:读取|写入|创建|修改|删除|运行|执行|测试|验证|安装)"
+        )
+        return executionClaim.containsMatchIn(lowerResponse) ||
+            listOf("工具结果：", "tool result:", "read_file(", "write_file(", "run_python(")
+                .any { lowerResponse.contains(it) }
     }
 
     /** 工具输出超长则截断，保留首部并标注被截字符数，避免单条结果撑爆 payload。 */
@@ -1027,7 +1021,7 @@ class AgentEngine(
         private const val MAX_TOOL_OUTPUT_CHARS = 12_000
         /** 发送前对话负载的真实 token 上限 */
         private const val MAX_PAYLOAD_TOKENS = 96_000L
-        /** 工具调用循环的绝对最大轮次，防止模型无限调工具循环 */
+        /** 工具调用循环的绝对最大轮次，防止模型无限调工具循环。 */
         private const val MAX_TOOL_ITERATIONS = 20
     }
 }

@@ -154,6 +154,11 @@ class PythonSandbox(private val context: Context) {
             )
             result
         } catch (e: TimeoutException) {
+            // Interrupt the pending task before abandoning this executor.  The
+            // native runtime may ignore the interrupt, but cancelling the
+            // Future prevents a queued task from starting if it has not begun
+            // and releases its bookkeeping promptly.
+            future.cancel(true)
             execThread = newExecThread() // abandon the stuck thread; don't reuse it
             PythonResult.failure(
                 "Python 执行超时 (${timeoutSeconds}秒)",

@@ -85,6 +85,10 @@ data class SandboxPolicy(
                     sandboxDir,
                 ),
                 allowedWritePaths = listOf(
+                    // Agent scripts run with the active project as their working
+                    // directory.  Keep that directory writable so a normal
+                    // run_python call can create/update project files.
+                    projectDir,
                     sandboxDir,
                     documentsDir,
                 ),
@@ -287,7 +291,7 @@ def __sandbox_check_path(path, allowed_list, operation):
     abs_path = __sb_os.path.abspath(__sb_os.path.realpath(path))
     for allowed in allowed_list:
         allowed_abs = __sb_os.path.abspath(__sb_os.path.realpath(allowed))
-        if abs_path.startswith(allowed_abs):
+        if abs_path == allowed_abs or abs_path.startswith(allowed_abs + __sb_os.sep):
             return True
     raise PermissionError("沙箱" + operation + ": " + str(path))
 
@@ -573,7 +577,11 @@ except Exception:
         return allowedPaths.any { allowed ->
             try {
                 val resolvedAllowed = File(allowed).canonicalPath
-                resolved.startsWith(resolvedAllowed)
+                // A path is inside the allowed directory itself or one of its
+                // descendants.  A raw prefix check would incorrectly allow
+                // siblings such as /workspace-other when /workspace is allowed.
+                resolved == resolvedAllowed ||
+                    resolved.startsWith(resolvedAllowed + File.separator)
             } catch (e: Exception) {
                 false
             }

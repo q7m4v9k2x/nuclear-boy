@@ -796,6 +796,10 @@ class DeepSeekApiClient(
                 }
                 retryCount++
                 val delayMs = retryDelayMillis(retryCount, e)
+                // Anthropic streams are replayed from byte zero on retry.  Tell
+                // collectors to discard the partial assistant text from the
+                // failed attempt, otherwise the replay is appended twice.
+                emit(StreamEvent.ContentReset)
                 emit(StreamEvent.Thinking("重试第 ${retryCount} 次，约 ${(delayMs + 999) / 1000} 秒…"))
                 delay(delayMs)
             }

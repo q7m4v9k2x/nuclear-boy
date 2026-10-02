@@ -46,6 +46,17 @@ class FileOperations(
         return root
     }
 
+    /**
+     * Whether a path already exists in the current project.  This is used by
+     * write tools to report CREATED versus MODIFIED based on the state before
+     * the write, rather than guessing from the new file size.
+     */
+    fun pathExists(path: String): Boolean = try {
+        resolvePath(path).exists()
+    } catch (_: Exception) {
+        false
+    }
+
     // ──────────────────────────────────────────────
     //  Basic file operations
     // ──────────────────────────────────────────────

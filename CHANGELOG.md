@@ -1,3 +1,4 @@
+2026-10-02 1.1.68：完成稳定性修复并发布可安装 APK。修复第三方网关兼容模式误拦截普通回答、Python 工具工作目录和沙箱路径边界、Chaquopy 属性读取、超时任务取消、write_file 创建/修改判定，以及无 API Key 重试丢失最后一条用户消息；通过模块单测、Android 15 模拟器工具链诊断和 assembleDebug。
 2026-06-16 1.1.62 修复 MiniMax-M3 等 OpenAI/Anthropic 兼容网关多轮工具调用续轮降级：工具执行卡现在保留真实 JSON arguments，后续历史回放不再把上一轮 `function.arguments` 发成空字符串，避免 MiniMax 返回 `invalid function arguments json string` 后误判为“工具受限，未真实执行”；已用真机分别验证 `https://api.minimaxi.com/v1` 和 `https://api.minimaxi.com/anthropic` 的读写文件三轮旅程。
 2026-06-15 1.1.61 真机模型门禁新增本地安全注入通道：Gradle 从未跟踪的 `android-test-secrets.properties` 或 `NB_TEST_*` 环境变量读取调试模型参数，并通过 DSL 注入 instrumentation，避免把 API Key 放进命令参数、会话日志或 Release 文本；同时修复工具草稿 UI 测试写入 `127.0.0.1:1` 假模型后不恢复配置，导致后续真实模型门禁误连本机假地址的问题。
 2026-06-15 1.1.60 API/远程配置草稿预警补齐订单履约和工单操作口语：`帮我把这个订单取消掉`、`把这个订单改物流单号`、`帮我把这个工单指派给管理员` 等表达会识别为需要真实接口或远程配置能力，同时 `怎么取消订单`、`发货通知文案` 和 `订单数据类` 不误报。

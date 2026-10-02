@@ -36,11 +36,20 @@ class ChaquopyPythonExecutor : PythonExecutor {
         try {
             val py = Python.getInstance()
             val pkgResources = py.getModule("pkg_resources")
-            val workingSet = pkgResources.callAttr("working_set")
+            // working_set is a module attribute (an iterable WorkingSet), not
+            // a callable function. Calling it raises TypeError on startup and
+            // leaves installed package discovery empty.
+            val workingSet = pkgResources.get("working_set")
             var count = 0
-            for (pkg in workingSet.asList()) {
-                installedPackages.add(pkg.callAttr("project_name").toString())
-                count++
+            if (workingSet != null) {
+                // WorkingSet implements iteration rather than sequence
+                // indexing, so convert it through Python's list() first.
+                val distributions = py.getModule("builtins").callAttr("list", workingSet)
+                for (pkg in distributions.asList()) {
+                    val projectName = pkg.callAttr("__getattribute__", "project_name")
+                    installedPackages.add(projectName.toString())
+                    count++
+                }
             }
             android.util.Log.e("NuclearBoy", "[Chaquopy] start — enumerated $count installed packages")
         } catch (e: Exception) {
@@ -177,7 +186,8 @@ class ChaquopyPythonExecutor : PythonExecutor {
     override fun getVersion(): String {
         return try {
             val sys = Python.getInstance().getModule("sys")
-            val version = "Python ${sys.callAttr("version")}"
+            // sys.version is a string attribute, not a callable function.
+            val version = "Python ${sys.get("version") ?: "3.11 (Chaquopy)"}"
             android.util.Log.e("NuclearBoy", "[Chaquopy] getVersion — $version")
             version
         } catch (e: Exception) {

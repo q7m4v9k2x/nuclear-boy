@@ -213,11 +213,31 @@ object AppModule {
 
         }
 
-        registry.pythonExecutor = { _, params ->
+        registry.pythonExecutor = pythonExecutor@{ _, params ->
             val scriptCode = params["path"] ?: params["script"]
             if (scriptCode == null) ToolResult(false, "", error = "缺少 path 参数。示例：path=\"print('hello')\"")
             else {
-                val wd = params["workingDir"]?.takeIf { it != "." } ?: fileOperations.projectRoot().absolutePath
+                val projectRoot = fileOperations.projectRoot().canonicalFile
+                val requestedWd = params["workingDir"]?.trim().orEmpty()
+                val wd = try {
+                    val candidate = if (requestedWd.isBlank() || requestedWd == ".") {
+                        projectRoot
+                    } else {
+                        val raw = File(requestedWd)
+                        if (raw.isAbsolute) raw else File(projectRoot, requestedWd)
+                    }.canonicalFile
+                    val insideProject = candidate == projectRoot ||
+                        candidate.path.startsWith(projectRoot.path + File.separator)
+                    if (!insideProject || !candidate.isDirectory) {
+                        return@pythonExecutor ToolResult(
+                            false,
+                            error = "workingDir 必须是当前项目内已存在的目录: $requestedWd",
+                        )
+                    }
+                    candidate.absolutePath
+                } catch (e: Exception) {
+                    return@pythonExecutor ToolResult(false, error = "workingDir 无效: ${e.message}")
+                }
                 val r = pythonSandbox.execute(scriptCode, wd, policy = SandboxPolicy.standard(wd))
                 android.util.Log.e("NuclearBoy", "[DI] pythonExecutor result — exitCode=${r.exitCode}, stdoutLen=${r.stdout.length}, stderrLen=${r.stderr.length}")
                 ToolResult(success = r.exitCode == 0, output = r.stdout, error = r.stderr.ifBlank { null })
@@ -324,10 +344,13 @@ object AppModule {
                 executor = { params ->
                     val path = params["path"] ?: return@ToolDefinition ToolResult(false, error = "缺少 path 参数")
                     val content = params["content"] ?: return@ToolDefinition ToolResult(false, error = "缺少 content 参数")
+                    // Capture the pre-write state.  The previous size-based
+                    // heuristic classified every non-empty newly-created file
+                    // as MODIFIED and every empty overwrite as CREATED.
+                    val existedBefore = fileOps.pathExists(path)
                     when (val result = kotlinx.coroutines.runBlocking { fileOps.writeFile(path, content) }) {
                         is AppResult.Success -> {
-                            // 检查文件写入前是否已存在，区分 CREATED vs MODIFIED
-                            val changeType = if (result.data.size > 0L && content.isNotEmpty()) ChangeType.MODIFIED else ChangeType.CREATED
+                            val changeType = if (existedBefore) ChangeType.MODIFIED else ChangeType.CREATED
                             android.util.Log.e("NuclearBoy", "[DI] write_file SUCCESS — path=$path changeType=$changeType")
                             ToolResult(
                                 success = true,
