@@ -8,6 +8,8 @@ import android.content.Intent
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -24,7 +26,19 @@ import java.util.concurrent.TimeUnit
  * - 发现新版本 → 发送系统通知
  * - 设置页手动检查 + 版本号显示
  */
-class UpdateManager(private val context: Context) {
+class UpdateManager internal constructor(
+    private val context: Context,
+    private val client: OkHttpClient,
+    private val notificationSender: ((UpdateResult.Available) -> Boolean)?,
+) {
+    constructor(context: Context) : this(
+        context,
+        OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
+            .build(),
+        null,
+    )
 
     companion object {
         private const val TAG = "NuclearBoy"
@@ -45,11 +59,6 @@ class UpdateManager(private val context: Context) {
         // 检查间隔：6小时
         private const val CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
     }
-
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .build()
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -158,33 +167,23 @@ class UpdateManager(private val context: Context) {
                 val latestVersion = release.tag_name.trim()
                 val currentVersion = getCurrentVersion()
                 Log.e(TAG, "$TAG_U GitHub: $latestVersion | 当前: $currentVersion")
-                prefs.edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
-
                 if (latestVersion.isBlank() || release.draft || release.prerelease || !isNewer(latestVersion, currentVersion)) {
                     Log.e(TAG, "$TAG_U 已是最新或 Release 不可发布")
+                    recordSuccessfulCheck()
                     return UpdateResult.UpToDate
                 }
 
                 val asset = selectApkAsset(release.assets)
-                    ?: return UpdateResult.Error("GitHub Release 未提供适配当前构建的 APK")
+                    ?: return UpdateResult.Error(
+                        "GitHub 版本 $latestVersion 尚未提供${if (isDebugBuild()) "调试版（debug）" else "正式版（release）"} APK，" +
+                            "请等待发布者补齐附件后重试",
+                    )
                 val downloadUrl = asset.browser_download_url.trim()
                 if (!downloadUrl.startsWith("https://", ignoreCase = true)) {
                     return UpdateResult.Error("GitHub APK 下载地址不是 HTTPS")
                 }
 
-                val lastKnown = prefs.getString(KEY_LAST_VERSION, "")
-                if (lastKnown != latestVersion) {
-                    prefs.edit().putString(KEY_LAST_VERSION, latestVersion).apply()
-                    showUpdateNotification(
-                        version = latestVersion,
-                        downloadUrl = downloadUrl,
-                        body = release.body,
-                        expectedSize = asset.size,
-                        expectedDigest = asset.digest.orEmpty(),
-                    )
-                }
-                Log.e(TAG, "$TAG_U 发现新版本: $latestVersion APK=${asset.name}")
-                return UpdateResult.Available(
+                val update = UpdateResult.Available(
                     version = latestVersion,
                     url = downloadUrl,
                     body = release.body,
@@ -192,21 +191,52 @@ class UpdateManager(private val context: Context) {
                     expectedSize = asset.size,
                     expectedDigest = asset.digest.orEmpty(),
                 )
+                recordSuccessfulCheck()
+                notifyIfNeeded(update)
+                Log.e(TAG, "$TAG_U 发现新版本: $latestVersion APK=${asset.name}")
+                return update
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "$TAG_U GitHub检查失败: ${e.message}")
             return UpdateResult.Error(e.message ?: "GitHub 检查失败")
         }
     }
 
+    private fun recordSuccessfulCheck() {
+        prefs.edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
+    }
+
+    private fun notifyIfNeeded(update: UpdateResult.Available) {
+        if (prefs.getString(KEY_LAST_VERSION, "") == update.version) return
+        try {
+            val sent = notificationSender?.invoke(update) ?: showUpdateNotification(
+                version = update.version,
+                downloadUrl = update.url,
+                body = update.body,
+                expectedSize = update.expectedSize,
+                expectedDigest = update.expectedDigest,
+            )
+            if (sent) prefs.edit().putString(KEY_LAST_VERSION, update.version).apply()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Notification permission or service failures must not hide a valid update.
+            Log.w(TAG, "$TAG_U 无法发送更新通知: ${e.message}")
+        }
+    }
+
+    private fun isDebugBuild(): Boolean = context.packageName.endsWith(".debug")
+
     private fun selectApkAsset(assets: List<GitHubAsset>): GitHubAsset? {
         val apkAssets = assets.filter { asset ->
             asset.name.endsWith(".apk", ignoreCase = true) &&
-                asset.browser_download_url.startsWith("https://", ignoreCase = true)
+                asset.browser_download_url.trim().startsWith("https://", ignoreCase = true)
         }
         if (apkAssets.isEmpty()) return null
 
-        val isDebugBuild = context.packageName.endsWith(".debug")
+        val isDebugBuild = isDebugBuild()
         val variant = if (isDebugBuild) "debug" else "release"
         return apkAssets.firstOrNull { it.name.contains(variant, ignoreCase = true) }
             ?: apkAssets.firstOrNull { !it.name.contains(if (isDebugBuild) "release" else "debug", ignoreCase = true) }
@@ -231,7 +261,8 @@ class UpdateManager(private val context: Context) {
         body: String,
         expectedSize: Long,
         expectedDigest: String,
-    ) {
+    ): Boolean {
+        if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return false
         createNotificationChannel()
 
         // 点击通知 → 触发应用内下载
@@ -261,6 +292,7 @@ class UpdateManager(private val context: Context) {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.notify(NOTIFICATION_ID, notification)
         Log.e(TAG, "$TAG_U 已发送更新通知: $version")
+        return true
     }
 
     private fun createNotificationChannel() {

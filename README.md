@@ -1,6 +1,6 @@
 # NUCLEAR BOY (核弹男孩)
 
-> 温暖、智能、人性化的移动端 AI 编程助手 · v1.1.75
+> 温暖、智能、人性化的移动端 AI 编程助手 · v1.1.76
 
 把一个能写代码、控手机、还能**远程操控电脑上 Claude Code / Codex / OpenCode** 的 AI 助手装进口袋。
 
@@ -54,6 +54,14 @@
 3. `./gradlew assembleDebug`
 
 或直接到 [Releases](https://github.com/q7m4v9k2x/nuclear-boy/releases) 下载 APK。
+
+覆盖更新请选择与当前安装一致的构建：正式版用 `*-release.apk`，调试版用 `*-debug.apk`（设置页“关于”可查看 BUILD）。每个版本同时发布两种 APK，发布流程见 [.github/RELEASING.md](.github/RELEASING.md)。
+
+## 1.1.76 重点
+
+- 补齐 v1.1.75 正式版 APK，解决旧正式版检查更新提示没有适配 APK 的问题；后续发布先校验并上传 Debug/Release 两种包，再公开版本
+- 缺附件或网络检查失败不再触发 6 小时成功缓存；缺附件提示明确指出所需构建，关闭通知不再导致检查更新误报失败
+- 增加更新检查回归测试，覆盖两种构建匹配、发布缺包后重试、通知权限拒绝和版本比较
 
 ## 1.1.75 重点
 
