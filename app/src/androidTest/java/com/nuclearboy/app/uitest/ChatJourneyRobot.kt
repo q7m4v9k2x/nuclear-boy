@@ -152,6 +152,16 @@ class ChatJourneyRobot {
         })
     }
 
+    /** Sends the already populated draft through the same visible button path
+     * used by the user, without waiting for the network operation to finish. */
+    fun tapSendButton(): UiObject2 {
+        val send = waitForObject("发送消息按钮", 10_000) {
+            device.findObject(By.desc("发送消息"))
+        }
+        tapObject(send)
+        return send
+    }
+
     fun sendPromptAndWait(
         prompt: String,
         label: String,

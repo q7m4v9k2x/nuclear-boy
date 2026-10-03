@@ -39,6 +39,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -89,7 +94,6 @@ import com.nuclearboy.ui.chat.parts.sortFilePanelEntries
 import com.nuclearboy.ui.chat.parts.shouldFollowChatScroll
 import com.nuclearboy.ui.chat.parts.shouldShowFileSelectionActionBar
 import com.nuclearboy.ui.chat.parts.shouldShowFilePanelClearFilterAction
-import com.nuclearboy.ui.chat.parts.shouldShowJumpToBottom
 import com.nuclearboy.ui.chat.parts.toggleSelectedFilePath
 import com.nuclearboy.ui.chat.parts.unselectHiddenFilePaths
 import com.nuclearboy.ui.chat.parts.unselectVisibleFilePaths
@@ -97,6 +101,7 @@ import com.nuclearboy.ui.chat.parts.visibleFilePanelEntries
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.time.LocalTime
 
@@ -142,7 +147,41 @@ fun ChatScreen(
     var filePanelScrollMax by remember { mutableStateOf(0f) }
     var inputDraft by rememberSaveable(projectId) { mutableStateOf("") }
     var inputFocusRequest by remember { mutableLongStateOf(0L) }
-    var forceNextScrollToBottom by remember { mutableStateOf(true) }
+    var followTail by remember(projectId) { mutableStateOf(true) }
+    val userScrollConnection = remember(listState, projectId) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                // Pause before the first consumed drag delta. Waiting for a
+                // distance threshold lets a streaming update cancel the drag.
+                if (source == NestedScrollSource.UserInput && available.y != 0f) {
+                    followTail = false
+                }
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                // Only a real drag towards the tail may re-enable following.
+                // Re-enabling on every post-scroll at the tail races with a
+                // growing assistant bubble: the list can still report
+                // `canScrollForward == false` for the same frame in which the
+                // user has started dragging upwards, so the next SSE chunk
+                // would steal the viewport back.
+                if (source == NestedScrollSource.UserInput && consumed.y < 0f && !listState.canScrollForward) {
+                    followTail = true
+                }
+                return Offset.Zero
+            }
+
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                // A fling/drag that ends at the actual tail is an intentional
+                // return to the newest content.  Keep this separate from
+                // onPostScroll so an upward drag cannot be mistaken for a
+                // bottom hit while the stream is remeasuring.
+                if (!listState.canScrollForward) followTail = true
+                return Velocity.Zero
+            }
+        }
+    }
     var showClearConfirm by remember { mutableStateOf(false) }
     var showConversationHistory by remember { mutableStateOf(false) }
     // 会话内搜索
@@ -155,7 +194,10 @@ fun ChatScreen(
     val currentMatchId = searchMatches.getOrNull(matchPointer)
         ?.let { messages.getOrNull(it)?.id }
     LaunchedEffect(matchPointer, searchMatches) {
-        searchMatches.getOrNull(matchPointer)?.let { listState.animateScrollToItem(it) }
+        searchMatches.getOrNull(matchPointer)?.let {
+            followTail = false
+            listState.animateScrollToItem(it)
+        }
     }
     // 外部分享进来的文本：填入输入框（不自动发送，让用户补充指令再发）
     LaunchedEffect(Unit) {
@@ -164,47 +206,21 @@ fun ChatScreen(
             inputFocusRequest++
         }
     }
-    val totalListItems by remember {
-        derivedStateOf { listState.layoutInfo.totalItemsCount }
-    }
-    val lastVisibleItemIndex by remember {
-        derivedStateOf { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
-    }
-    // Item indexes are insufficient while the last assistant bubble is
-    // streaming: the user can scroll up inside that one tall item and its
-    // index remains the last visible index.  Track the actual gap between the
-    // last visible item's bottom and the viewport bottom so new chunks only
-    // follow when the user is genuinely near the bottom.
-    val distanceFromBottomPx by remember {
+    val conversationAtTail by remember {
         derivedStateOf {
             val layoutInfo = listState.layoutInfo
             val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()
-            lastVisible?.let {
-                (it.offset + it.size - layoutInfo.viewportEndOffset).coerceAtLeast(0)
-            }
-        }
-    }
-    val followChatScroll by remember {
-        derivedStateOf {
             shouldFollowChatScroll(
-                totalItemsCount = totalListItems,
-                lastVisibleItemIndex = lastVisibleItemIndex,
-                distanceFromBottomPx = distanceFromBottomPx,
+                totalItemsCount = layoutInfo.totalItemsCount,
+                lastVisibleItemIndex = lastVisible?.index,
+                distanceFromBottomPx = lastVisible?.let {
+                    (it.offset + it.size - layoutInfo.viewportEndOffset).coerceAtLeast(0)
+                },
             )
         }
     }
     val showJumpToBottom by remember {
-        derivedStateOf {
-            shouldShowJumpToBottom(
-                totalItemsCount = totalListItems,
-                lastVisibleItemIndex = lastVisibleItemIndex,
-                distanceFromBottomPx = distanceFromBottomPx,
-            )
-        }
-    }
-    val lastMessageContentLength = messages.lastOrNull()?.content?.length ?: 0
-    LaunchedEffect(projectId) {
-        forceNextScrollToBottom = true
+        derivedStateOf { !conversationAtTail && listState.canScrollForward }
     }
 
     // File picker for attachments
@@ -218,34 +234,22 @@ fun ChatScreen(
         }
     }
 
-    // Instant scroll to bottom on project switch (first load)
-    LaunchedEffect(scrollToBottom) {
-        if (messages.isNotEmpty() && (forceNextScrollToBottom || followChatScroll)) {
-            // A zero offset aligns the message's *top* with the viewport.  A
-            // streaming bubble grows in place, so that made every chunk yank
-            // the screen back to the beginning of the latest message.  Use a
-            // very large positive offset; LazyListState clamps it to the
-            // furthest legal position, i.e. the actual conversation bottom
-            // (including the trailing spacer/padding).
-            listState.requestScrollToItem(messages.lastIndex, Int.MAX_VALUE)
-        }
-        // Reset unconditionally so clearing the conversation while scrollToBottom fires
-        // does not leak `true` into the next conversation (finding 11).
-        forceNextScrollToBottom = false
-    }
-    // Consolidated scroll trigger: animate when a new message is appended, snap (instant)
-    // when only content length changed (streaming chunks).  Having two separate
-    // LaunchedEffects with different scroll calls caused the instant snap to cancel the
-    // in-flight animation every time streaming started, producing a jarring jump (finding 10).
-    val prevMessageCount = remember { mutableIntStateOf(messages.size) }
-    LaunchedEffect(messages.size, lastMessageContentLength) {
-        if (messages.isNotEmpty() && followChatScroll) {
-            val countChanged = messages.size != prevMessageCount.intValue
-            prevMessageCount.intValue = messages.size
-            if (countChanged) {
-                listState.animateScrollToItem(messages.lastIndex, Int.MAX_VALUE)
-            } else {
-                listState.requestScrollToItem(messages.lastIndex, Int.MAX_VALUE)
+    // Target the small trailing item, avoiding huge offsets on a tall bubble.
+    val bottomItemIndex = messages.size
+    // One owner for automatic scrolling. Wait until the new trailing item is
+    // present in LazyColumn before issuing the request. During send(), the
+    // user message and the assistant placeholder are published in separate
+    // state updates; issuing scrollToItem() in the first frame can otherwise
+    // clamp to the just-sent user bubble and leave the viewport there for the
+    // whole stream. The flow is cancelled immediately if the user starts a
+    // drag and followTail becomes false.
+    LaunchedEffect(messages, scrollToBottom, followTail, listState.isScrollInProgress) {
+        if (messages.isNotEmpty() && followTail && !listState.isScrollInProgress) {
+            val targetIndex = bottomItemIndex
+            snapshotFlow { listState.layoutInfo.totalItemsCount }
+                .first { count -> count > targetIndex }
+            if (followTail && !listState.isScrollInProgress) {
+                listState.scrollToItem(targetIndex)
             }
         }
     }
@@ -462,7 +466,7 @@ fun ChatScreen(
                 Box(modifier = Modifier.fillMaxSize()) {
                     LazyColumn(
                         state = listState,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxSize().nestedScroll(userScrollConnection),
                         contentPadding = PaddingValues(top = 8.dp, bottom = inputBarRestHeight + 8.dp),
                         verticalArrangement = Arrangement.spacedBy(1.dp),
                     ) {
@@ -521,9 +525,10 @@ fun ChatScreen(
                 ScrollToBottomAction(
                     visible = showJumpToBottom,
                     onClick = {
+                        followTail = true
                         scope.launch {
                             if (messages.isNotEmpty()) {
-                                listState.animateScrollToItem(messages.lastIndex, Int.MAX_VALUE)
+                                listState.scrollToItem(bottomItemIndex)
                             }
                         }
                     },
@@ -540,7 +545,10 @@ fun ChatScreen(
                     text = inputDraft,
                     onTextChange = { inputDraft = it },
                     isProcessing = isProcessing,
-                    onSend = { text -> viewModel.sendMessage(text) },
+                    onSend = { text ->
+                        followTail = true
+                        viewModel.sendMessage(text)
+                    },
                     onCancel = { viewModel.cancelCurrentOperation() },
                     fileCount = viewModel.projectFiles.collectAsState().value.size,
                     hasMessages = messages.any { it.role != MessageRole.SYSTEM },

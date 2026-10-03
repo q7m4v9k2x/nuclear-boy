@@ -1,6 +1,6 @@
 # NUCLEAR BOY (核弹男孩)
 
-> 温暖、智能、人性化的移动端 AI 编程助手 · v1.1.74
+> 温暖、智能、人性化的移动端 AI 编程助手 · v1.1.75
 
 把一个能写代码、控手机、还能**远程操控电脑上 Claude Code / Codex / OpenCode** 的 AI 助手装进口袋。
 
@@ -54,6 +54,11 @@
 3. `./gradlew assembleDebug`
 
 或直接到 [Releases](https://github.com/q7m4v9k2x/nuclear-boy/releases) 下载 APK。
+
+## 1.1.75 重点
+
+- 生成文本时自动滚动只在用户停留底部时生效；等待尾部项完成布局，避免跳回刚发送的用户消息；开始上翻后立即暂停，新增流式 SSE + Android 15 UIAutomator 回归测试
+- 自动定位改为列表实际尾部，避免每个文本块把页面拉回发送消息顶部
 
 ## 1.1.74 重点
 

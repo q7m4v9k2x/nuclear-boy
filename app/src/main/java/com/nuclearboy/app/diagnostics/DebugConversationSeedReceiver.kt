@@ -19,7 +19,11 @@ import java.io.File
 class DebugConversationSeedReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != ACTION_SEED_CONVERSATION && intent.action != ACTION_CLEAR_CONVERSATION) return
+        if (intent.action != ACTION_SEED_CONVERSATION &&
+            intent.action != ACTION_CLEAR_CONVERSATION &&
+            intent.action != ACTION_SNAPSHOT_CONVERSATION &&
+            intent.action != ACTION_RESTORE_CONVERSATION
+        ) return
         if (!BuildConfig.DEBUG) {
             Log.e(TAG, "ignored in non-debug build")
             return
@@ -45,6 +49,18 @@ class DebugConversationSeedReceiver : BroadcastReceiver() {
         try {
             val root = File(context.getExternalFilesDir(null), AppConstants.APP_DOCUMENTS_DIR)
             val file = File(root, "$projectId/.agent/conversation.json")
+            val backup = File(file.parentFile, ".conversation.scroll-test-backup.json")
+            if (intent.action == ACTION_SNAPSHOT_CONVERSATION) {
+                if (file.isFile) file.copyTo(backup, overwrite = true) else backup.delete()
+                Log.e(TAG, "conversation snapshot saved project=$projectId exists=${file.isFile}")
+                return
+            }
+            if (intent.action == ACTION_RESTORE_CONVERSATION) {
+                if (backup.isFile) backup.copyTo(file, overwrite = true) else file.delete()
+                backup.delete()
+                Log.e(TAG, "conversation snapshot restored project=$projectId exists=${file.isFile}")
+                return
+            }
             if (intent.action == ACTION_CLEAR_CONVERSATION) {
                 if (file.exists() && !file.delete()) {
                     throw IllegalStateException("conversation file could not be deleted")
@@ -85,6 +101,8 @@ class DebugConversationSeedReceiver : BroadcastReceiver() {
         private const val TAG = "NuclearBoyDebugConversation"
         const val ACTION_SEED_CONVERSATION = "com.nuclearboy.app.DEBUG_SEED_CONVERSATION"
         const val ACTION_CLEAR_CONVERSATION = "com.nuclearboy.app.DEBUG_CLEAR_CONVERSATION"
+        const val ACTION_SNAPSHOT_CONVERSATION = "com.nuclearboy.app.DEBUG_SNAPSHOT_CONVERSATION"
+        const val ACTION_RESTORE_CONVERSATION = "com.nuclearboy.app.DEBUG_RESTORE_CONVERSATION"
         const val EXTRA_PROJECT_ID = "project_id"
         const val EXTRA_USER_CONTENT = "user_content"
         const val EXTRA_USER_CONTENT_B64 = "user_content_b64"

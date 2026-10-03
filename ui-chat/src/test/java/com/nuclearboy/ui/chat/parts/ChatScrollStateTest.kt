@@ -42,6 +42,24 @@ class ChatScrollStateTest {
     }
 
     @Test
+    fun earlierVisibleItemNeverCountsAsConversationBottom() {
+        assertFalse(
+            shouldFollowChatScroll(
+                totalItemsCount = 9,
+                lastVisibleItemIndex = 4,
+                distanceFromBottomPx = 0,
+            ),
+        )
+        assertTrue(
+            shouldShowJumpToBottom(
+                totalItemsCount = 9,
+                lastVisibleItemIndex = 4,
+                distanceFromBottomPx = 0,
+            ),
+        )
+    }
+
+    @Test
     fun coarseIndexFallbackRemainsCompatible() {
         assertTrue(
             shouldFollowChatScroll(
