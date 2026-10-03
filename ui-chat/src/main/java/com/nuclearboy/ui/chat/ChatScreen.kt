@@ -170,11 +170,26 @@ fun ChatScreen(
     val lastVisibleItemIndex by remember {
         derivedStateOf { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
     }
+    // Item indexes are insufficient while the last assistant bubble is
+    // streaming: the user can scroll up inside that one tall item and its
+    // index remains the last visible index.  Track the actual gap between the
+    // last visible item's bottom and the viewport bottom so new chunks only
+    // follow when the user is genuinely near the bottom.
+    val distanceFromBottomPx by remember {
+        derivedStateOf {
+            val layoutInfo = listState.layoutInfo
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()
+            lastVisible?.let {
+                (it.offset + it.size - layoutInfo.viewportEndOffset).coerceAtLeast(0)
+            }
+        }
+    }
     val followChatScroll by remember {
         derivedStateOf {
             shouldFollowChatScroll(
                 totalItemsCount = totalListItems,
                 lastVisibleItemIndex = lastVisibleItemIndex,
+                distanceFromBottomPx = distanceFromBottomPx,
             )
         }
     }
@@ -183,6 +198,7 @@ fun ChatScreen(
             shouldShowJumpToBottom(
                 totalItemsCount = totalListItems,
                 lastVisibleItemIndex = lastVisibleItemIndex,
+                distanceFromBottomPx = distanceFromBottomPx,
             )
         }
     }
@@ -205,7 +221,13 @@ fun ChatScreen(
     // Instant scroll to bottom on project switch (first load)
     LaunchedEffect(scrollToBottom) {
         if (messages.isNotEmpty() && (forceNextScrollToBottom || followChatScroll)) {
-            listState.requestScrollToItem(messages.lastIndex)
+            // A zero offset aligns the message's *top* with the viewport.  A
+            // streaming bubble grows in place, so that made every chunk yank
+            // the screen back to the beginning of the latest message.  Use a
+            // very large positive offset; LazyListState clamps it to the
+            // furthest legal position, i.e. the actual conversation bottom
+            // (including the trailing spacer/padding).
+            listState.requestScrollToItem(messages.lastIndex, Int.MAX_VALUE)
         }
         // Reset unconditionally so clearing the conversation while scrollToBottom fires
         // does not leak `true` into the next conversation (finding 11).
@@ -221,9 +243,9 @@ fun ChatScreen(
             val countChanged = messages.size != prevMessageCount.intValue
             prevMessageCount.intValue = messages.size
             if (countChanged) {
-                listState.animateScrollToItem(messages.lastIndex)
+                listState.animateScrollToItem(messages.lastIndex, Int.MAX_VALUE)
             } else {
-                listState.requestScrollToItem(messages.lastIndex)
+                listState.requestScrollToItem(messages.lastIndex, Int.MAX_VALUE)
             }
         }
     }
@@ -501,7 +523,7 @@ fun ChatScreen(
                     onClick = {
                         scope.launch {
                             if (messages.isNotEmpty()) {
-                                listState.animateScrollToItem(messages.lastIndex)
+                                listState.animateScrollToItem(messages.lastIndex, Int.MAX_VALUE)
                             }
                         }
                     },

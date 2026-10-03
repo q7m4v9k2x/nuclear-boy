@@ -6,8 +6,8 @@ entry_point: "main:run"
 
 permissions:
   filesystem:
-    read: [workspace/**]
-    write: [workspace/**]
+    read: [workspace/**, project_skills/**, global_skills/**]
+    write: [workspace/**, project_skills/**, global_skills/**]
   network:
     allowed: false
   packages:
@@ -29,3 +29,9 @@ parameters:
     description: "编程语言（python/kotlin/javascript）"
     required: false
     default: "python"
+  - name: scope
+    type: choice
+    description: "保存范围：project（当前项目）或 global（全局共享）"
+    required: false
+    default: "project"
+    allowedValues: [project, global]

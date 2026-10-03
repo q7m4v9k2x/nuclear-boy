@@ -1,16 +1,43 @@
 """
 Skill Creator — 在项目中快速创建新的 Skill 模板。
 
-用法: skill_skill-creator skill_name=my-tool description="我的工具" language=python
+用法: skill_skill-creator skill_name=my-tool description="我的工具" language=python scope=project
 
-输出: 在 .agent/skills/<skill_name>/ 下创建完整的 skill 文件结构
+输出: 在项目级 .agent/skills/ 或全局 Skills 目录下创建完整的 skill 文件结构
 """
 import os
 import sys
+import re
 
-def run(skill_name: str, description: str, language: str = "python") -> str:
-    # 确保 skills 目录存在
-    skills_dir = os.path.join(".agent", "skills", skill_name)
+def run(skill_name: str, description: str, language: str = "python", scope: str = "project") -> str:
+    """Create a skill in the selected scope.
+
+    The host changes cwd to the installed skill directory.  Resolve the
+    destination from host-provided absolute roots instead of a relative
+    ``.agent/skills`` path, which otherwise writes into the creator itself.
+    """
+    skill_name = (skill_name or "").strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", skill_name):
+        return "❌ skill_name 只能包含小写字母、数字、下划线和连字符，且长度不超过 64"
+
+    scope = (scope or "project").strip().lower()
+    if scope in ("global", "全局", "user", "用户"):
+        scope = "global"
+        base_dir = os.environ.get("NB_GLOBAL_SKILLS_DIR", "")
+        scope_label = "全局"
+    elif scope in ("project", "项目", "workspace", "当前项目"):
+        scope = "project"
+        base_dir = os.environ.get("NB_PROJECT_SKILLS_DIR", "")
+        scope_label = "项目"
+    else:
+        return "❌ scope 只能是 project（项目级）或 global（全局）"
+
+    if not base_dir:
+        return f"❌ 未找到{scope_label} Skills 目录，请先打开一个项目后重试" if scope == "project" else "❌ 未找到全局 Skills 目录"
+
+    # The host policy checks these roots; name validation above prevents path
+    # traversal even when called outside the normal host.
+    skills_dir = os.path.join(base_dir, skill_name)
     os.makedirs(skills_dir, exist_ok=True)
 
     # 生成 skill.yaml
@@ -66,8 +93,8 @@ def run(input: str = "") -> str:
 
     return f"""✨ Skill 「{skill_name}」创建成功！
 
-📁 文件结构:
-  .agent/skills/{skill_name}/
+📁 文件结构（{scope_label}）:
+  {skills_dir}/
   ├── skill.yaml   —— 元数据声明
   └── main.py      —— 入口脚本
 

@@ -169,6 +169,7 @@ object SystemPromptBuilder {
             // ═══════════════════════════════════════════════
             appendLine("环境：Android $androidRelease，Python 3.11 (Chaquopy)，预装python-docx/openpyxl/Pillow/chardet/python-pptx/requests/beautifulsoup4。")
             appendLine("文件操作使用相对路径，默认在当前项目目录下。生成Word/Excel用run_python+python-docx/openpyxl。")
+            appendLine("run_python 默认只访问当前项目；确需读写共享存储时传 scope=global（需用户在系统设置开启‘所有文件访问’权限），不要伪造已获授权。")
             appendLine("read_file 不支持目录，只能读文件。先list_directory看结构。")
             appendLine()
 

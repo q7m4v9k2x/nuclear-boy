@@ -111,9 +111,11 @@ fun SkillManagerPanel(
                         Text(currentSkill.description, color = Color(0xFF838896), fontSize = 11.sp)
                     }
                 }
-                if (currentSkill.isProjectSkill) {
-                    Text("📁 项目级 Skill", color = Color(0xFF0A84FF), fontSize = 11.sp)
-                }
+                Text(
+                    if (currentSkill.isProjectSkill) "📁 项目级 Skill" else "🌐 全局级 Skill",
+                    color = if (currentSkill.isProjectSkill) Color(0xFF0A84FF) else Color(0xFF00E676),
+                    fontSize = 11.sp,
+                )
                 Spacer(Modifier.height(12.dp))
                 HorizontalDivider(color = Color(0xFF1E2230))
                 Spacer(Modifier.height(8.dp))
@@ -148,7 +150,7 @@ fun SkillManagerPanel(
             Column(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
                 Text("已激活 Skills (${skills.size})", color = Color(0xFF0A84FF), fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Spacer(Modifier.height(4.dp))
-                Text("在项目中让 AI 创建 skill.yaml 到 .agent/skills/ 即可自动加载", color = Color(0xFF4E515B), fontSize = 11.sp)
+                Text("项目级写入 .agent/skills/，全局级使用 scope=global；创建后会立即加载", color = Color(0xFF4E515B), fontSize = 11.sp)
                 Spacer(Modifier.height(16.dp))
 
                 if (skills.isEmpty()) {
@@ -175,9 +177,11 @@ fun SkillManagerPanel(
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(skill.name, color = Color(0xFF00E676), fontWeight = FontWeight.Bold, fontSize = 14.sp)
                                         Text(skill.description.take(100), color = Color(0xFF838896), fontSize = 11.sp, maxLines = 2)
-                                        if (skill.isProjectSkill) {
-                                            Text("项目级", color = Color(0xFF0A84FF), fontSize = 10.sp)
-                                        }
+                                        Text(
+                                            if (skill.isProjectSkill) "项目级" else "全局级",
+                                            color = if (skill.isProjectSkill) Color(0xFF0A84FF) else Color(0xFF00E676),
+                                            fontSize = 10.sp,
+                                        )
                                     }
                                     Icon(Icons.Filled.ChevronRight, null, tint = Color(0xFF4E515B), modifier = Modifier.size(20.dp))
                                 }

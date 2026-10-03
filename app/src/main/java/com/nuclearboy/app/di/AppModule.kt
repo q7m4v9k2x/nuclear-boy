@@ -1,6 +1,7 @@
 package com.nuclearboy.app.di
 
 import android.content.Context
+import android.os.Environment
 import com.nuclearboy.agent.AgentEngine
 import com.nuclearboy.agent.SystemPromptBuilder
 import com.nuclearboy.agent.ToolRegistry
@@ -12,6 +13,7 @@ import com.nuclearboy.common.*
 import com.nuclearboy.common.toFileSizeString
 import com.nuclearboy.app.python.ChaquopyPythonExecutor
 import com.nuclearboy.app.service.PcTaskNotifier
+import com.nuclearboy.app.ui.permissions.PermissionManager
 import com.nuclearboy.memory.MemoryStore
 import com.nuclearboy.python.PythonExecutor
 import com.nuclearboy.python.PythonSandbox
@@ -225,28 +227,54 @@ object AppModule {
             val scriptCode = params["path"] ?: params["script"]
             if (scriptCode == null) ToolResult(false, "", error = "缺少 path 参数。示例：path=\"print('hello')\"")
             else {
+                val scope = params["scope"]?.trim()?.lowercase().orEmpty().ifBlank { "project" }
+                if (scope !in setOf("project", "global")) {
+                    return@pythonExecutor ToolResult(false, error = "scope 只能是 project 或 global")
+                }
+                val globalScope = scope == "global"
+                if (globalScope && !PermissionManager.isAllFilesAccessGranted(appContext)) {
+                    return@pythonExecutor ToolResult(
+                        false,
+                        error = "全局文件访问需要开启‘所有文件访问’权限。请在系统设置中为核弹男孩开启后重试。",
+                    )
+                }
                 val projectRoot = fileOperations.projectRoot().canonicalFile
+                val externalRoot = Environment.getExternalStorageDirectory().canonicalFile
+                val accessRoot = if (globalScope) externalRoot else projectRoot
                 val requestedWd = params["workingDir"]?.trim().orEmpty()
                 val wd = try {
                     val candidate = if (requestedWd.isBlank() || requestedWd == ".") {
-                        projectRoot
+                        accessRoot
                     } else {
                         val raw = File(requestedWd)
-                        if (raw.isAbsolute) raw else File(projectRoot, requestedWd)
+                        if (raw.isAbsolute) raw else File(accessRoot, requestedWd)
                     }.canonicalFile
-                    val insideProject = candidate == projectRoot ||
-                        candidate.path.startsWith(projectRoot.path + File.separator)
-                    if (!insideProject || !candidate.isDirectory) {
+                    val insideScope = candidate == accessRoot ||
+                        candidate.path.startsWith(accessRoot.path + File.separator)
+                    if (!insideScope || !candidate.isDirectory) {
                         return@pythonExecutor ToolResult(
                             false,
-                            error = "workingDir 必须是当前项目内已存在的目录: $requestedWd",
+                            error = if (globalScope) {
+                                "global scope 的 workingDir 必须是共享存储内已存在的目录: $requestedWd"
+                            } else {
+                                "workingDir 必须是当前项目内已存在的目录: $requestedWd"
+                            },
                         )
                     }
                     candidate.absolutePath
                 } catch (e: Exception) {
                     return@pythonExecutor ToolResult(false, error = "workingDir 无效: ${e.message}")
                 }
-                val r = pythonSandbox.execute(scriptCode, wd, policy = SandboxPolicy.standard(wd))
+                val policy = if (globalScope) {
+                    // relaxed() grants read/write within shared external
+                    // storage while still enforcing Python's shell and size
+                    // limits.  It is available only after the explicit
+                    // Android all-files permission check above.
+                    SandboxPolicy.relaxed(wd)
+                } else {
+                    SandboxPolicy.standard(wd)
+                }
+                val r = pythonSandbox.execute(scriptCode, wd, policy = policy)
                 android.util.Log.e("NuclearBoy", "[DI] pythonExecutor result — exitCode=${r.exitCode}, stdoutLen=${r.stdout.length}, stderrLen=${r.stderr.length}")
                 ToolResult(success = r.exitCode == 0, output = r.stdout, error = r.stderr.ifBlank { null })
             }
@@ -274,8 +302,24 @@ object AppModule {
             skillManager.configureToolCallbacks(
                 register = { name, desc, _ ->
                     android.util.Log.e("NuclearBoy", "[DI] skill tool register callback — skillName=$name, desc=${desc.take(50)}")
+                    val parameters = skillManager.getSkill(name)?.manifest?.parameters.orEmpty().map { parameter ->
+                        val toolType = when (parameter.type.lowercase()) {
+                            "int", "integer" -> "integer"
+                            "float", "double", "number" -> "number"
+                            "bool", "boolean" -> "boolean"
+                            else -> "string"
+                        }
+                        com.nuclearboy.agent.ToolParameter(
+                            name = parameter.name,
+                            type = toolType,
+                            description = parameter.description,
+                            required = parameter.required,
+                            default = parameter.default,
+                            enum = parameter.allowedValues.takeIf { it.isNotEmpty() },
+                        )
+                    }
                     runBlocking {
-                        registry.register(ToolDefinition("skill_$name", desc,
+                        registry.register(ToolDefinition("skill_$name", desc, parameters = parameters,
                             executor = { p ->
                                 when (val r = runBlocking { skillManager.executeSkill(name, p) }) {
                                     is AppResult.Success -> ToolResult(true, "OK")

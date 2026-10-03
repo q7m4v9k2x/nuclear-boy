@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import android.util.Log
@@ -108,6 +109,34 @@ object PermissionManager {
         return Settings.System.canWrite(context)
     }
 
+    /**
+     * Whether the app can access arbitrary shared-storage paths.  Android's
+     * scoped-storage rules make READ/WRITE_EXTERNAL_STORAGE insufficient on
+     * Android 11+; the explicit "all files access" special permission is
+     * required for the optional global Python scope.
+     */
+    fun isAllFilesAccessGranted(context: Context): Boolean {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
+    }
+
+    /** Open the system page where the user can grant all-files access. */
+    fun openAllFilesAccessSettings(context: Context) {
+        val intent = Intent(
+            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+            Uri.parse("package:${context.packageName}"),
+        ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        try {
+            context.startActivity(intent)
+        } catch (_: Exception) {
+            // Some vendor ROMs expose only the global storage settings page.
+            context.startActivity(
+                Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                },
+            )
+        }
+    }
+
     // ── 打开系统设置页 ─────────────────────────────
 
     /** 打开应用详情设置页 */
@@ -178,6 +207,7 @@ object PermissionManager {
         }
         Log.e(TAG, "$TAG_P 通知监听: ${if (isNotificationListenerEnabled(context)) "✅" else "❌"}")
         Log.e(TAG, "$TAG_P 写入设置: ${if (canWriteSettings(context)) "✅" else "❌"}")
+        Log.e(TAG, "$TAG_P 全部文件访问: ${if (isAllFilesAccessGranted(context)) "✅" else "❌"}")
         Log.e(TAG, "$TAG_P 无障碍: ${if (isAccessibilityServiceEnabled(context)) "✅" else "❌"}")
     }
 }

@@ -37,6 +37,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.nuclearboy.api.deepseek.ApiKeyManager
 import com.nuclearboy.api.deepseek.DeepSeekApiClient
 import com.nuclearboy.api.deepseek.ProviderEndpointMode
@@ -73,6 +76,7 @@ import com.nuclearboy.app.ui.settings.parts.providerModelListVisibleModels
 import com.nuclearboy.app.ui.settings.parts.providerModelRouteHint
 import com.nuclearboy.app.ui.settings.parts.providerModelRouteSuggestedModel
 import com.nuclearboy.app.ui.settings.parts.providerRequestCurlTemplate
+import com.nuclearboy.app.ui.permissions.PermissionManager
 import com.nuclearboy.remotepc.PcBridgeClient
 import com.nuclearboy.remotepc.PcBridgeConfigStore
 import com.nuclearboy.app.update.UpdateDownloader
@@ -655,6 +659,19 @@ fun SettingsScreen(
     val pcBridgeTestState by viewModel.pcBridgeTestState.collectAsState()
     val scrollState = rememberScrollState()
     var showSponsorDialog by remember { mutableStateOf(false) }
+    var allFilesAccessGranted by remember {
+        mutableStateOf(PermissionManager.isAllFilesAccessGranted(context))
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                allFilesAccessGranted = PermissionManager.isAllFilesAccessGranted(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Scaffold(
         topBar = {
@@ -681,6 +698,40 @@ fun SettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            // ── File / Python access ────────────────────
+            Text("📂 文件与 Python 权限",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        if (allFilesAccessGranted) "✅ 已允许共享存储全局读写"
+                        else "⚠️ 仅限应用目录与当前项目",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "run_python 默认在当前项目沙箱执行；开启后可用 scope=global 读写共享存储。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    if (allFilesAccessGranted) {
+                        OutlinedButton(onClick = { PermissionManager.openAllFilesAccessSettings(context) }) {
+                            Text("管理全局读写权限")
+                        }
+                    } else {
+                        Button(onClick = { PermissionManager.openAllFilesAccessSettings(context) }) {
+                            Text("开启全局读写权限")
+                        }
+                    }
+                }
+            }
+
             // ── API Key Section ──────────────────────────
             Text("🔑 API 设置",
                 style = MaterialTheme.typography.labelLarge,

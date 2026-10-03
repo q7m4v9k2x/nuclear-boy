@@ -296,6 +296,7 @@ class ToolRegistry {
                 parameters = listOf(
                     ToolParameter("path", "string", "要执行的 Python 代码（完整脚本）", required = true),
                     ToolParameter("workingDir", "string", "工作目录", required = false, default = "."),
+                    ToolParameter("scope", "string", "文件访问范围：project（当前项目，默认）或 global（外部存储全局读写，需开启所有文件访问权限）", required = false, default = "project", enum = listOf("project", "global")),
                     ToolParameter("timeout", "integer", "超时秒数（默认 120）", required = false, default = "120"),
                 ),
                 requiresConfirmation = false,

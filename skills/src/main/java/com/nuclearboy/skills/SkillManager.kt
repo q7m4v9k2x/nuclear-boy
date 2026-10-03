@@ -146,9 +146,14 @@ class SkillManager(
             unloadProjectSkillsInternal()
             // 2. Set new project dir
             currentProjectSkillsDir = projectSkillsDir.also { it.mkdirs() }
-            // 3. Scan and register project skills
+            // 3. Scan project skills first.  Publishing the combined list
+            // before registering tools lets the app-side callback read each
+            // manifest's parameter schema (including the Skill Creator's
+            // project/global scope choice) when it builds the model tool
+            // definition.
             val skillDirs = projectSkillsDir.listFiles()?.filter { it.isDirectory } ?: emptyList()
             android.util.Log.e("NuclearBoy", "[SkillMgr] reloadProjectSkills() found ${skillDirs.size} skill directories")
+            val manifests = mutableListOf<SkillManifest>()
             skillDirs.forEach { dir ->
                 val yamlFile = dir.resolve("skill.yaml")
                 if (yamlFile.isFile) {
@@ -156,12 +161,53 @@ class SkillManager(
                     if (manifest != null) {
                         android.util.Log.e("NuclearBoy", "[SkillMgr] reloadProjectSkills() registered project skill: ${manifest.name}")
                         projectSkillNames.add(manifest.name)
-                        registerTool(manifest.name, manifest.description, emptyMap())
+                        manifests += manifest
                     }
                 }
             }
-            // 4. Refresh combined list
+            // 4. Refresh combined list, then register project tools.
             refreshSkills()
+            manifests.forEach { manifest ->
+                registerTool(manifest.name, manifest.description, emptyMap())
+            }
+            updateActiveSkills()
+        }
+    }
+
+    /**
+     * Re-scan the app-wide skill store after a skill has been created or
+     * edited by a running skill.  [refreshSkills] updates the state flow, but
+     * historically it did not register tools for files that appeared after
+     * the initial callback configuration.  That meant a global skill could
+     * be listed only after restarting the app and could not be called by the
+     * agent in the current conversation.
+     *
+     * The operation deliberately keeps the currently selected project skill
+     * set intact.  Project switching/unloading remains the responsibility of
+     * [reloadProjectSkills] and [unloadProjectSkills].
+     */
+    suspend fun reloadGlobalSkills() = withContext(Dispatchers.IO) {
+        projectSkillsMutex.withLock {
+            refreshSkills()
+
+            // refreshSkills() scans global skills before project skills, so a
+            // duplicate name resolves to the same tool semantics as startup.
+            // Register only paths that are direct children of skillsDir; this
+            // prevents a project skill from being accidentally registered as
+            // global when both stores contain a skill with the same name.
+            _installedSkills.value
+                .filter { isGlobalSkill(it) }
+                .forEach { skill ->
+                    registerTool(
+                        skill.manifest.name,
+                        skill.manifest.description,
+                        emptyMap(),
+                    )
+                }
+
+            // refreshSkills already publishes activeSkills, but publish once
+            // more after registration so observers that sample the flow in the
+            // same frame as a creator result see a settled value.
             updateActiveSkills()
         }
     }
@@ -432,10 +478,22 @@ class SkillManager(
         // Params are passed via env var (not string-interpolated into the script)
         // so that untrusted parameter values can't break out of the Python source
         // and inject arbitrary code — ChaquopyPythonExecutor escapes env values safely.
+        // Skills run with their own directory as cwd.  Provide explicit,
+        // absolute roots so helpers such as skill-creator can persist files
+        // to the current project or to the global skill store without
+        // accidentally writing under the installed helper directory.
+        val projectSkillsDir = currentProjectSkillsDir?.canonicalPath.orEmpty()
+        val projectRoot = currentProjectSkillsDir?.parentFile?.parentFile?.canonicalPath.orEmpty()
+        val globalSkillsDir = skillsDir.canonicalPath
         val result = pythonSandbox.execute(
             pythonScript,
             skill.installPath,
-            env = mapOf("NB_SKILL_PARAMS_JSON" to paramsJson),
+            env = mapOf(
+                "NB_SKILL_PARAMS_JSON" to paramsJson,
+                "NB_PROJECT_SKILLS_DIR" to projectSkillsDir,
+                "NB_PROJECT_ROOT" to projectRoot,
+                "NB_GLOBAL_SKILLS_DIR" to globalSkillsDir,
+            ),
             policy = buildSkillPolicy(skill),
         )
 
@@ -562,10 +620,12 @@ class SkillManager(
             version = manifest.version,
         )
 
-        // Register as a tool
+        // Publish the new manifest before registering the tool so callbacks
+        // can expose its complete parameter schema to the model.
+        refreshSkills()
+        // Register as a tool. Re-installing an existing skill may change its
+        // description or parameters, so deliberately replace the definition.
         android.util.Log.e("NuclearBoy", "[SkillMgr] installSkillInternal() registering tool for ${installed.manifest.name}")
-        // Re-installing an existing skill may change its description or
-        // parameters, so deliberately replace the previous tool definition.
         registerTool(
             installed.manifest.name,
             installed.manifest.description,
@@ -573,7 +633,6 @@ class SkillManager(
             force = true,
         )
 
-        refreshSkills()
         android.util.Log.e("NuclearBoy", "[SkillMgr] installSkillInternal() success: ${manifest.name}")
         return AppResult.success(installed)
     }
@@ -654,10 +713,31 @@ sys.exit(result.returncode)
             (perms.filesystem.read.all { it.startsWith("workspace") } &&
                 perms.filesystem.write.all { it.startsWith("workspace") })
 
-        return if (fsWorkspaceOnly) {
+        // The built-in creator is intentionally allowed to write only to the
+        // two skill roots.  Its manifest uses project_skills/global_skills
+        // aliases; map those aliases to absolute paths here while retaining
+        // the normal per-skill sandbox for every other skill.
+        val isSkillCreator = skill.manifest.name.equals("skill-creator", ignoreCase = true)
+        val creatorRoots = if (isSkillCreator) {
+            listOfNotNull(
+                skill.installPath,
+                skillsDir.canonicalPath,
+                currentProjectSkillsDir?.canonicalPath,
+            )
+        } else emptyList()
+
+        return if (fsWorkspaceOnly && !isSkillCreator) {
             SandboxPolicy(
                 allowedReadPaths = listOf(skill.installPath),
                 allowedWritePaths = listOf(skill.installPath),
+                networkAllowed = networkAllowed,
+                allowedPackages = allowedPackages,
+                shellAllowed = shellAllowed,
+            )
+        } else if (isSkillCreator) {
+            SandboxPolicy(
+                allowedReadPaths = creatorRoots,
+                allowedWritePaths = creatorRoots,
                 networkAllowed = networkAllowed,
                 allowedPackages = allowedPackages,
                 shellAllowed = shellAllowed,
@@ -713,6 +793,15 @@ if result is not None:
         return if (dir.isDirectory) dir else null
     }
 
+    /** True when an installed skill lives directly in the global skill store. */
+    private fun isGlobalSkill(skill: InstalledSkill): Boolean = try {
+        skill.installDir.canonicalFile.parentFile?.canonicalFile == skillsDir.canonicalFile
+    } catch (_: Exception) {
+        // A deleted or inaccessible directory cannot be a newly discoverable
+        // global skill; leave it to the next successful scan.
+        false
+    }
+
     private fun parseAndEmitSkill(yamlFile: File, dir: File): InstalledSkill? {
         val manifest = parseManifest(yamlFile.readText()) ?: return null
         val metaFile = dir.resolve(".install-meta.json")
@@ -743,7 +832,7 @@ if result is not None:
     /**
      * Parses a minimal YAML subset sufficient for skill.yaml files.
      * Supports: top-level scalars, nested mappings (2 levels), lists of strings,
-     * and block scalars (|, >).
+     * lists of simple objects (for tool parameters), and block scalars (|, >).
      * Does NOT support: anchors, tags, complex nesting.
      */
     private fun parseManifest(yaml: String): SkillManifest? {
@@ -854,6 +943,37 @@ if result is not None:
     private fun parseNestedValue(lines: List<String>): Any {
         if (lines.isEmpty()) return emptyMap<String, Any>()
 
+        // YAML lists of objects (the manifest's `parameters` section) arrive
+        // here with one `- key: value` line followed by indented key/value
+        // lines.  Preserve each object as its own map instead of flattening
+        // the whole block into one map; otherwise skill tools are registered
+        // without their arguments and providers reject valid calls.
+        val hasListOfMaps = lines.any { it.trimStart().startsWith("- ") } &&
+            lines.any { !it.trimStart().startsWith("- ") && ':' in it }
+        if (hasListOfMaps) {
+            val entries = mutableListOf<MutableMap<String, Any>>()
+            var current: MutableMap<String, Any>? = null
+            fun parseEntryField(rawLine: String, target: MutableMap<String, Any>) {
+                val colonIdx = rawLine.indexOf(':')
+                if (colonIdx <= 0) return
+                val key = rawLine.substring(0, colonIdx).trim().removePrefix("-").trim()
+                if (key.isEmpty()) return
+                target[key] = parseScalarValue(rawLine.substring(colonIdx + 1).trim())
+            }
+            lines.forEach { rawLine ->
+                val line = rawLine.trimStart()
+                if (line.startsWith("- ")) {
+                    current?.let { entries.add(it) }
+                    current = mutableMapOf()
+                    parseEntryField(line.removePrefix("- "), current!!)
+                } else {
+                    current?.let { parseEntryField(line, it) }
+                }
+            }
+            current?.let(entries::add)
+            return entries
+        }
+
         // Check if this is a list (lines starting with '- ')
         val isList = lines.all { it.trimStart().startsWith("- ") }
         if (isList) {
@@ -878,6 +998,12 @@ if result is not None:
     private fun parseScalarValue(raw: String): Any {
         val value = raw.trim().trim('"').trim('\'')
         return when {
+            value.startsWith("[") && value.endsWith("]") -> {
+                value.removePrefix("[").removeSuffix("]")
+                    .split(',')
+                    .map { it.trim().trim('"').trim('\'') }
+                    .filter { it.isNotEmpty() }
+            }
             value.equals("true", ignoreCase = true) -> true
             value.equals("false", ignoreCase = true) -> false
             value.equals("null", ignoreCase = true) || value.equals("~") -> "null"
@@ -991,6 +1117,10 @@ if result is not None:
                 description = (map["description"] as? String) ?: "",
                 required = (map["required"] as? Boolean) ?: true,
                 default = map["default"] as? String,
+                allowedValues = (map["allowedValues"] as? List<*>)
+                    ?.filterIsInstance<String>()
+                    ?: (map["allowed_values"] as? List<*>)?.filterIsInstance<String>()
+                    ?: emptyList(),
             )
         }
     }

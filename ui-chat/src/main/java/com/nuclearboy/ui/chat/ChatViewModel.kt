@@ -1133,6 +1133,11 @@ class ChatViewModel @Inject constructor(
                             AppConstants.PROJECT_SKILLS_DIR,
                         )
                         skillManager.reloadProjectSkills(skillsDir)
+                        // Skill Creator can target the app-wide store with
+                        // scope=global.  Refresh that store as well so the
+                        // new skill is visible and registered as a tool in
+                        // this same conversation, without an app restart.
+                        skillManager.reloadGlobalSkills()
                         android.util.Log.e(
                             "NuclearBoy",
                             "[ChatVM] skill tool completed; activeSkills=${skillManager.activeSkills.value.size}",
